@@ -173,24 +173,47 @@ function toHexString(bytes) {
 }
 
 /**
- * FeliCa Polling の応答から IDm を取り出す。
+ * 応答の中から指定タグの中身を取り出す。
  *
- * 応答の中には次の並びが含まれる:
- *   [長さ][応答コード 0x01][IDm 8バイト][PMm 8バイト](+[システムコード 2バイト])
- *   長さは 0x14(20バイト) または 0x12(18バイト)
- *
- * 応答全体のバイト数は環境によって変わるため、固定位置で切り出さず
- * この並びを先頭から探して取り出す（長さ判定より頑丈）。
+ * RC-S300 の応答は、先頭10バイトの通信ヘッダの後ろに
+ *   [タグ][長さ][中身...][タグ][長さ][中身...]
+ * という並び（TLV形式）が続く。例:
+ *   C0 03 00 90 00 / 92 01 00 / 96 02 00 00 / 97 14 (カードからの応答20バイト)
+ * カードからの応答は タグ 0x97 に入っている。
  */
-function extractIdm(res) {
-  for (let i = 0; i + 10 <= res.length; i++) {
-    if ((res[i] !== 0x14 && res[i] !== 0x12) || res[i + 1] !== 0x01) continue;
-    let idm = '';
-    for (let j = i + 2; j < i + 10; j++) idm += hex2(res[j]);
-    if (/^0+$/.test(idm)) continue; // 全ゼロは無効なIDmなので読み飛ばす
-    return idm;
+function findTlv(res, tag) {
+  let i = 10; // 通信ヘッダ10バイトの後ろから並びが始まる
+  while (i + 2 <= res.length) {
+    const t = res[i];
+    const len = res[i + 1];
+    const start = i + 2;
+    if (start + len > res.length) break; // 長さが合わない＝解釈できないので終了
+    if (t === tag) return res.slice(start, start + len);
+    i = start + len;
   }
   return null;
+}
+
+/** デバッグ用: カードからの応答部分（タグ0x97の中身）を取り出す */
+function getCardResponse(res) {
+  return findTlv(res, 0x97);
+}
+
+/**
+ * FeliCa Polling の応答から IDm を取り出す。
+ *
+ * カードからの応答（タグ0x97の中身）は次の形:
+ *   [長さ][応答コード 0x01][IDm 8バイト][PMm 8バイト](+[システムコード 2バイト])
+ * カードが無い場合はこの中身が空、または応答コードが 0x01 にならない。
+ */
+function extractIdm(res) {
+  const card = getCardResponse(res);
+  if (!card || card.length < 10 || card[1] !== 0x01) return null;
+
+  let idm = '';
+  for (let j = 2; j < 10; j++) idm += hex2(card[j]);
+  if (/^0+$/.test(idm)) return null; // 全ゼロは無効なIDm
+  return idm;
 }
 
 // ---- 初期化 & 1回分のポーリング -------------------------------------
@@ -210,16 +233,30 @@ async function readOnce() {
 
   await send([0xff, 0x50, 0x00, 0x00, 0x02, 0x82, 0x00, 0x00]); await receive(); // end session
 
-  // デバッグ中は生の応答を画面に出す（内容が変わったときだけ／ログが流れないように）
+  const idm = extractIdm(res);
+
+  // デバッグ中は応答の中身を画面に出す。
+  // 先頭10バイトの通信ヘッダには毎回変わる通信カウンタが入っており、
+  // それを含めて比較すると毎回「変化した」と判定されログが流れ続けるため、
+  // ヘッダを除いた部分で比較する。
   if (debugMode) {
-    const hex = toHexString(res);
-    if (hex !== lastDebugHex) {
-      lastDebugHex = hex;
-      log(`応答 ${res.length}バイト: ${hex}`);
+    const key = toHexString(res.slice(10));
+    if (key !== lastDebugHex) {
+      lastDebugHex = key;
+      const card = getCardResponse(res);
+      log(`応答${res.length}B: ${key}`);
+      if (!card) {
+        log('→ カード応答の入れ物(0x97)が無い＝リーダーが応答を返していない');
+      } else if (card.length === 0) {
+        log('→ カード応答が空＝カードが電波に反応していない');
+      } else {
+        log(`→ カード応答${card.length}B: ${toHexString(card)}`);
+      }
+      log(idm ? `→ IDm = ${idm}` : '→ IDm を取り出せず');
     }
   }
 
-  return extractIdm(res);
+  return idm;
 }
 
 // ---- ポーリングループ ------------------------------------------------

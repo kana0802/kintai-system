@@ -69,8 +69,9 @@
   button.foot.secondary { background:#2a4d6e; }
   .conn-dot { width:12px; height:12px; border-radius:50%; background:var(--ng); display:inline-block; }
   .conn-dot.on { background:var(--in); }
-  .log { max-height:100px; overflow:auto; width:100%; font-size:13px; opacity:.85; }
-  .log div { padding:2px 0; font-variant-numeric:tabular-nums; }
+  /* 調査時にログを読み取れるよう、広め・折り返しありで表示する */
+  .log { max-height:190px; overflow:auto; width:100%; font-size:14px; opacity:.95; line-height:1.5; }
+  .log div { padding:2px 0; font-variant-numeric:tabular-nums; word-break:break-all; }
   dialog { border:none; border-radius:16px; padding:20px; background:var(--card); color:#fff; max-width:90vw; }
   dialog input { width:100%; margin:8px 0 16px; padding:10px 12px; border-radius:10px; border:1px solid #3a5f80; background:#0e2c46; color:#fff; font-size:14px; }
   .row { display:flex; gap:10px; }
