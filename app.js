@@ -418,6 +418,42 @@ $('saveSettings').addEventListener('click', () => {
 });
 $('closeSettings').addEventListener('click', () => $('settings').close());
 
+// GASへの疎通テスト。カードを使わず、保存中のURLへ実際に通信して原因を切り分ける。
+$('testBtn').addEventListener('click', async () => {
+  const url = getGasUrl();
+  if (!url) { log('テスト: GAS URLが未設定です（設定から入力してください）'); return; }
+
+  // 保存されているURLを画面に出して、正しい /exec かを目で確認できるようにする
+  log('保存中URL: ' + url);
+  if (!/^https:\/\/script\.google\.com\/macros\/s\/.+\/exec$/.test(url)) {
+    log('⚠ URLの形が想定と違います。正しくは script.google.com/macros/s/.../exec で終わる形です');
+  }
+
+  // ① まずGET（doGet）で疎通を確認
+  try {
+    log('テスト①GET送信中…');
+    const r = await fetch(url, { method: 'GET' });
+    const t = await r.text();
+    log(`テスト①GET成功 HTTP${r.status}: ${t.slice(0, 120)}`);
+  } catch (e) {
+    log('テスト①GET失敗: ' + e.message);
+  }
+
+  // ② 実際の打刻と同じPOST（ダミーIDm）で確認
+  try {
+    log('テスト②POST送信中…');
+    const r = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({ idm: 'TESTCARD00000001', type: '出勤' }),
+    });
+    const t = await r.text();
+    log(`テスト②POST成功 HTTP${r.status}: ${t.slice(0, 120)}`);
+  } catch (e) {
+    log('テスト②POST失敗: ' + e.message);
+  }
+});
+
 $('debugBtn').addEventListener('click', () => {
   debugMode = !debugMode;
   lastDebugHex = '';
