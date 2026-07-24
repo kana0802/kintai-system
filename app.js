@@ -317,13 +317,10 @@ async function onCardDetected(idm) {
   const abortTimer = setTimeout(() => ctrl.abort(), SEND_TIMEOUT_SEC * 1000);
 
   try {
-    // Content-Type を text/plain にして CORS プリフライトを回避（GASはe.postData.contentsで受け取れる）
-    const resp = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify({ idm, type }),
-      signal: ctrl.signal,
-    });
+    // GAS WebアプリはPOSTだとCORSで弾かれる（応答を読めない）ため、GETで送る。
+    // idm と type をURLのクエリに載せ、GAS側は doGet で受け取って記録する。
+    const sendUrl = url + '?idm=' + encodeURIComponent(idm) + '&type=' + encodeURIComponent(type);
+    const resp = await fetch(sendUrl, { method: 'GET', signal: ctrl.signal });
 
     // JSON以外（ログイン画面のHTMLなど）が返ることがあるため、
     // 先に文字列で受け取ってから解釈し、失敗時は中身を表示して原因を追えるようにする
@@ -439,18 +436,15 @@ $('testBtn').addEventListener('click', async () => {
     log('テスト①GET失敗: ' + e.message);
   }
 
-  // ② 実際の打刻と同じPOST（ダミーIDm）で確認
+  // ② 実際の打刻と同じGET送信（ダミーIDm）で確認
   try {
-    log('テスト②POST送信中…');
-    const r = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify({ idm: 'TESTCARD00000001', type: '出勤' }),
-    });
+    log('テスト②送信中…');
+    const testUrl = url + '?idm=TESTCARD00000001&type=' + encodeURIComponent('出勤');
+    const r = await fetch(testUrl, { method: 'GET' });
     const t = await r.text();
-    log(`テスト②POST成功 HTTP${r.status}: ${t.slice(0, 120)}`);
+    log(`テスト②成功 HTTP${r.status}: ${t.slice(0, 120)}`);
   } catch (e) {
-    log('テスト②POST失敗: ' + e.message);
+    log('テスト②失敗: ' + e.message);
   }
 });
 
