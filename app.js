@@ -26,7 +26,8 @@ const RETAP_RESET_MS = 2500; // カードが離れて再度読めるまでの間
 // タブレットでは開発者ツールが使えないため、リーダーからの生の応答を
 // 画面下部のログに出せるようにする（原因調査用。通常運用ではOFF）
 let debugMode = false;
-let lastDebugHex = '';      // 同じ応答を連続で出さないための直前値
+let lastDebugHexF = '';     // FeliCa応答: 同じ内容を連続表示しないための直前値
+let lastDebugHexA = '';     // MIFARE応答: 同上
 
 // ---- 画面の状態 -------------------------------------------------------
 // 'idle'   … 出勤/退勤ボタンの選択待ち
@@ -217,13 +218,41 @@ function extractIdm(res) {
   return idm;
 }
 
-// ---- 初期化 & 1回分のポーリング -------------------------------------
-async function readOnce() {
-  // トランスペアレントセッション開始 → RF ON → プロトコルF → Polling → 終了
-  await send([0xff, 0x50, 0x00, 0x00, 0x02, 0x82, 0x00, 0x00]); await receive(); // end session
-  await send([0xff, 0x50, 0x00, 0x00, 0x02, 0x81, 0x00, 0x00]); await receive(); // start session
-  await send([0xff, 0x50, 0x00, 0x00, 0x02, 0x83, 0x00, 0x00]); await receive(); // RF off
-  await send([0xff, 0x50, 0x00, 0x00, 0x02, 0x84, 0x00, 0x00]); await receive(); // RF on
+/**
+ * MIFARE (Type A) の GET UID 応答から UID を取り出す。
+ *
+ * GET UID コマンド(FF CA 00 00)の応答は末尾が成功ステータス 90 00 で、
+ * その直前に UID（4バイトまたは7バイト）が入る:
+ *   [...通信ヘッダ...][UID 4 or 7バイト][90 00]
+ * カードが無い / 失敗のときは 90 00 で終わらない（63 00 等になる）。
+ */
+function extractUidA(res) {
+  if (res.length < 4) return null;
+  // 末尾が 90 00（成功）でなければUIDは取れていない
+  if (res[res.length - 2] !== 0x90 || res[res.length - 1] !== 0x00) return null;
+
+  // 90 00 の手前にあるデータ部を取り出す。通信ヘッダ(先頭10バイト)は除く。
+  const body = res.slice(10, res.length - 2);
+  if (body.length < 4 || body.length > 10) return null; // UIDは通常4 or 7バイト
+
+  let uid = '';
+  for (let j = 0; j < body.length; j++) uid += hex2(body[j]);
+  if (/^0+$/.test(uid)) return null;
+  return uid;
+}
+
+// ---- リーダー制御コマンド（共通） ------------------------------------
+const CMD_END_SESSION   = [0xff, 0x50, 0x00, 0x00, 0x02, 0x82, 0x00, 0x00];
+const CMD_START_SESSION = [0xff, 0x50, 0x00, 0x00, 0x02, 0x81, 0x00, 0x00];
+const CMD_RF_OFF        = [0xff, 0x50, 0x00, 0x00, 0x02, 0x83, 0x00, 0x00];
+const CMD_RF_ON         = [0xff, 0x50, 0x00, 0x00, 0x02, 0x84, 0x00, 0x00];
+
+// ---- FeliCa（Type F）を1回読む --------------------------------------
+async function readOnceFelica() {
+  await send(CMD_END_SESSION);   await receive();
+  await send(CMD_START_SESSION); await receive();
+  await send(CMD_RF_OFF);        await receive();
+  await send(CMD_RF_ON);         await receive();
   await send([0xff, 0x50, 0x00, 0x02, 0x04, 0x8f, 0x02, 0x03, 0x00, 0x00]); await receive(); // protocol type F
 
   // FeliCa Polling（システムコード FFFF / リクエストコード 01）
@@ -232,47 +261,74 @@ async function readOnce() {
               0xff, 0xff, 0x01, 0x00, 0x00, 0x00, 0x00]);
   const res = await receive();
 
-  await send([0xff, 0x50, 0x00, 0x00, 0x02, 0x82, 0x00, 0x00]); await receive(); // end session
+  await send(CMD_END_SESSION); await receive();
+  return res;
+}
 
-  const idm = extractIdm(res);
+// ---- MIFARE（Type A）を1回読む --------------------------------------
+async function readOnceTypeA() {
+  await send(CMD_END_SESSION);   await receive();
+  await send(CMD_START_SESSION); await receive();
+  await send(CMD_RF_OFF);        await receive();
+  await send(CMD_RF_ON);         await receive();
+  await send([0xff, 0x50, 0x00, 0x02, 0x04, 0x8f, 0x02, 0x00, 0x03, 0x00]); await receive(); // protocol type A
 
-  // デバッグ中は応答の中身を画面に出す。
-  // 先頭10バイトの通信ヘッダには毎回変わる通信カウンタが入っており、
-  // それを含めて比較すると毎回「変化した」と判定されログが流れ続けるため、
-  // ヘッダを除いた部分で比較する。
+  // GET UID（PC/SC標準）: FF CA 00 00 00
+  await send([0xff, 0xca, 0x00, 0x00, 0x00]);
+  const res = await receive();
+
+  await send(CMD_END_SESSION); await receive();
+  return res;
+}
+
+// ---- 1回分のポーリング（FeliCa→ダメならMIFARE） ---------------------
+async function readOnce() {
+  // ① まず FeliCa（Suica等）を試す
+  const resF = await readOnceFelica();
+  const idm = extractIdm(resF);
+
   if (debugMode) {
-    const key = toHexString(res.slice(10));
-    if (key !== lastDebugHex) {
-      lastDebugHex = key;
-      const card = getCardResponse(res);
-      log(`応答${res.length}B: ${key}`);
-      if (!card) {
-        log('→ カード応答の入れ物(0x97)が無い＝リーダーが応答を返していない');
-      } else if (card.length === 0) {
-        log('→ カード応答が空＝カードが電波に反応していない');
-      } else {
-        log(`→ カード応答${card.length}B: ${toHexString(card)}`);
-      }
-      log(idm ? `→ IDm = ${idm}` : '→ IDm を取り出せず');
+    const keyF = toHexString(resF.slice(10));
+    if (keyF !== lastDebugHexF) {
+      lastDebugHexF = keyF;
+      const card = getCardResponse(resF);
+      log(`F応答${resF.length}B: ${keyF}`);
+      if (card && card.length > 0) log(`→ FeliCaカード応答${card.length}B: ${toHexString(card)}`);
+      log(idm ? `→ FeliCa IDm = ${idm}` : '→ FeliCaでは読めず（MIFAREを試します）');
     }
   }
+  if (idm) return { type: 'F', id: idm };
 
-  return idm;
+  // ② FeliCaで読めなければ MIFARE（Type A）を試す
+  const resA = await readOnceTypeA();
+  const uid = extractUidA(resA);
+
+  if (debugMode) {
+    const keyA = toHexString(resA.slice(10));
+    if (keyA !== lastDebugHexA) {
+      lastDebugHexA = keyA;
+      log(`A応答${resA.length}B: ${keyA}`);
+      log(uid ? `→ MIFARE UID = ${uid}` : '→ MIFAREでも読めず（末尾が90 00でない＝UID未取得）');
+    }
+  }
+  if (uid) return { type: 'A', id: uid };
+
+  return null;
 }
 
 // ---- ポーリングループ ------------------------------------------------
 async function pollLoop() {
   while (polling && device) {
     try {
-      const idm = await readOnce();
+      const card = await readOnce(); // { type:'F'|'A', id } または null
       const now = Date.now();
-      if (idm) {
+      if (card) {
         // 同じカードが載りっぱなしの間は1回だけ処理する
-        const isNew = (idm !== lastIdm) || (now - lastSeenAt > RETAP_RESET_MS);
+        const isNew = (card.id !== lastIdm) || (now - lastSeenAt > RETAP_RESET_MS);
         lastSeenAt = now;
         if (isNew) {
-          lastIdm = idm;
-          await onCardDetected(idm);
+          lastIdm = card.id;
+          await onCardDetected(card.id);
         }
       } else {
         // カードが離れたら状態リセット（同じカードの再タッチを許可）
@@ -450,7 +506,8 @@ $('testBtn').addEventListener('click', async () => {
 
 $('debugBtn').addEventListener('click', () => {
   debugMode = !debugMode;
-  lastDebugHex = '';
+  lastDebugHexF = '';
+  lastDebugHexA = '';
   $('debugBtn').textContent = debugMode ? 'デバッグOFF' : 'デバッグ';
   log(debugMode ? 'デバッグ表示を開始（リーダーの応答を表示します）' : 'デバッグ表示を停止');
 });
