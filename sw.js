@@ -1,5 +1,5 @@
 // PWA用の最小Service Worker（アプリシェルをキャッシュしてインストール可能にする）
-const CACHE = 'attendance-v7';
+const CACHE = 'attendance-v8';
 const ASSETS = [
   './index.html',
   './app.js',

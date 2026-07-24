@@ -342,9 +342,48 @@ async function pollLoop() {
   }
 }
 
+// ---- GASへのGET通信（打刻・登録 共通） -------------------------------
+// GAS WebアプリはPOSTだとCORSで弾かれるため、全てGETのクエリで送る。
+// paramsObj 例: { idm, type } / { action:'register', idm, name }
+async function gasRequest(paramsObj) {
+  const url = getGasUrl();
+  if (!url) return { ok: false, message: 'GASのURLが未設定です（設定から入力）' };
+
+  const qs = Object.entries(paramsObj)
+    .map(([k, v]) => encodeURIComponent(k) + '=' + encodeURIComponent(v))
+    .join('&');
+
+  // 応答が返らないまま固まるのを防ぐため制限時間を設ける
+  const ctrl = new AbortController();
+  const abortTimer = setTimeout(() => ctrl.abort(), SEND_TIMEOUT_SEC * 1000);
+  try {
+    const resp = await fetch(url + '?' + qs, { method: 'GET', signal: ctrl.signal });
+    const text = await resp.text();
+    try {
+      return JSON.parse(text);
+    } catch (e) {
+      log(`GASの応答が想定外(HTTP ${resp.status}): ${text.slice(0, 150)}`);
+      return { ok: false, message: `GASの応答が不正です（HTTP ${resp.status}）` };
+    }
+  } catch (err) {
+    const msg = (err.name === 'AbortError')
+      ? `GASから${SEND_TIMEOUT_SEC}秒以内に応答がありません`
+      : '送信失敗: ' + err.message;
+    return { ok: false, message: msg };
+  } finally {
+    clearTimeout(abortTimer);
+  }
+}
+
 // ---- カード検出時 ----------------------------------------------------
 async function onCardDetected(idm) {
   log('カード検出 IDm=' + idm);
+
+  // 登録モード中ならカードIDを取り込んで氏名入力ダイアログを開く
+  if (uiState === 'enroll') {
+    enrollCapture(idm);
+    return;
+  }
 
   // 出勤/退勤ボタンが押されていない間はカードを読んでも記録しない
   if (uiState !== 'armed') {
@@ -353,12 +392,6 @@ async function onCardDetected(idm) {
   }
   if (navigator.vibrate) { try { navigator.vibrate(80); } catch (e) { /* 非対応端末は無視 */ } }
 
-  const url = getGasUrl();
-  if (!url) {
-    showResult({ ok: false, message: 'GASのURLが未設定です（設定から入力）' });
-    return;
-  }
-
   // カードを読めた時点で「かざし待ち」は完了。
   // GASの応答が遅くても「時間切れ」にならないよう、ここでカウントダウンを止める。
   clearArmTimers();
@@ -366,40 +399,70 @@ async function onCardDetected(idm) {
   $('status').textContent = '記録しています…';
   log('GASへ送信中…');
 
-  const type = selectedType;
+  const data = await gasRequest({ idm: idm, type: selectedType });
+  showResult(data);
+  log('送信結果: ' + JSON.stringify(data));
+}
 
-  // 応答が返らないまま固まるのを防ぐため制限時間を設ける
-  const ctrl = new AbortController();
-  const abortTimer = setTimeout(() => ctrl.abort(), SEND_TIMEOUT_SEC * 1000);
+// ---- 社員証の登録（新入職員用） -------------------------------------
+let enrollIdm = '';
 
-  try {
-    // GAS WebアプリはPOSTだとCORSで弾かれる（応答を読めない）ため、GETで送る。
-    // idm と type をURLのクエリに載せ、GAS側は doGet で受け取って記録する。
-    const sendUrl = url + '?idm=' + encodeURIComponent(idm) + '&type=' + encodeURIComponent(type);
-    const resp = await fetch(sendUrl, { method: 'GET', signal: ctrl.signal });
+/** 登録モードに入る（カードをかざす待ち） */
+function toEnroll() {
+  if (!device || !polling) { alert('先にリーダーへ接続してください'); return; }
+  clearArmTimers();
+  uiState = 'enroll';
+  lastIdm = '';
+  enrollIdm = '';
 
-    // JSON以外（ログイン画面のHTMLなど）が返ることがあるため、
-    // 先に文字列で受け取ってから解釈し、失敗時は中身を表示して原因を追えるようにする
-    const text = await resp.text();
-    let data;
-    try {
-      data = JSON.parse(text);
-    } catch (e) {
-      log(`GASの応答が想定外(HTTP ${resp.status}): ${text.slice(0, 150)}`);
-      showResult({ ok: false, message: `GASの応答が不正です（HTTP ${resp.status}）` });
-      return;
-    }
+  $('status').textContent = '登録：社員証をかざしてください';
+  $('choose').style.display = 'none';
+  $('panel').style.display  = 'none';
+  $('armed').style.display  = 'flex';
 
-    showResult(data);
-    log('送信結果: ' + JSON.stringify(data));
-  } catch (err) {
-    const msg = (err.name === 'AbortError')
-      ? `GASから${SEND_TIMEOUT_SEC}秒以内に応答がありません`
-      : '送信失敗: ' + err.message;
-    showResult({ ok: false, message: msg });
-    log(msg);
-  } finally {
-    clearTimeout(abortTimer);
+  const badge = $('armedBadge');
+  badge.textContent = '登録';
+  badge.className = 'badge in';
+
+  // 無操作なら自動で選択画面に戻す
+  let remain = ARM_TIMEOUT_SEC;
+  $('count').textContent = `（${remain}秒以内にかざしてください）`;
+  countTimer = setInterval(() => {
+    remain--;
+    $('count').textContent = remain > 0 ? `（${remain}秒以内にかざしてください）` : '';
+  }, 1000);
+  armTimer = setTimeout(() => { log('時間切れのため選択に戻ります'); toIdle(); }, ARM_TIMEOUT_SEC * 1000);
+}
+
+/** 登録モードでカードを読めたら、氏名入力ダイアログを開く */
+function enrollCapture(idm) {
+  clearArmTimers();
+  enrollIdm = idm;
+  uiState = 'result'; // ダイアログ入力中は打刻・再検出をしない中立状態
+  $('count').textContent = '';
+  $('status').textContent = '';
+  $('enrollIdm').textContent = idm;
+  $('enrollName').value = '';
+  $('enrollDlg').showModal();
+  setTimeout(() => $('enrollName').focus(), 50);
+  if (navigator.vibrate) { try { navigator.vibrate(80); } catch (e) {} }
+}
+
+/** 氏名を入力して「登録する」を押したとき */
+async function enrollSubmit() {
+  const name = $('enrollName').value.trim();
+  if (!name) { alert('氏名を入力してください'); return; }
+  const idm = enrollIdm;
+  $('enrollDlg').close();
+
+  $('status').textContent = '登録しています…';
+  const data = await gasRequest({ action: 'register', idm: idm, name: name });
+  log('登録結果: ' + JSON.stringify(data));
+
+  if (data.ok) {
+    showResult({ ok: true, duplicated: false, name: name, type: data.updated ? '氏名を更新' : '登録完了', time: idm });
+  } else {
+    showResult({ ok: false, message: data.message || '登録に失敗しました' });
   }
 }
 
@@ -460,6 +523,13 @@ $('btnOut').addEventListener('click', () => toArmed('退勤'));
 $('cancelBtn').addEventListener('click', toIdle);
 
 $('connectBtn').addEventListener('click', connect);
+
+// 社員証の登録
+$('enrollBtn').addEventListener('click', toEnroll);
+$('enrollSave').addEventListener('click', enrollSubmit);
+$('enrollCancel').addEventListener('click', () => { $('enrollDlg').close(); toIdle(); });
+$('enrollName').addEventListener('keydown', (e) => { if (e.key === 'Enter') enrollSubmit(); });
+
 $('settingsBtn').addEventListener('click', () => {
   $('gasUrl').value = getGasUrl();
   $('settings').showModal();
