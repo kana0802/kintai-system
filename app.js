@@ -22,6 +22,12 @@ let lastIdm = '';           // 直近に検出したIDm（連続検出の抑制�
 let lastSeenAt = 0;         // 直近にカードを検出した時刻
 const RETAP_RESET_MS = 2500; // カードが離れて再度読めるまでの間隔
 
+// ---- デバッグ表示 ----------------------------------------------------
+// タブレットでは開発者ツールが使えないため、リーダーからの生の応答を
+// 画面下部のログに出せるようにする（原因調査用。通常運用ではOFF）
+let debugMode = false;
+let lastDebugHex = '';      // 同じ応答を連続で出さないための直前値
+
 // ---- 画面の状態 -------------------------------------------------------
 // 'idle'   … 出勤/退勤ボタンの選択待ち
 // 'armed'  … 種別を選び、カードをかざす待ち
@@ -152,9 +158,39 @@ async function send(data) {
   await sleep(20);
 }
 
-async function receive(maxLen = 64) {
+async function receive(maxLen = 512) {
   const res = await device.transferIn(epIn, maxLen);
-  return new Uint8Array(res.data.buffer);
+  const d = res.data;
+  if (!d) return new Uint8Array(0);
+  // .buffer だけを渡すと「確保した器のサイズ」になってしまうため、
+  // 実際に届いたバイト数(byteLength)だけを切り出す。
+  return new Uint8Array(d.buffer, d.byteOffset, d.byteLength);
+}
+
+/** バイト列を "12 34 AB" 形式にする（デバッグ表示用） */
+function toHexString(bytes) {
+  return Array.from(bytes).map(hex2).join(' ');
+}
+
+/**
+ * FeliCa Polling の応答から IDm を取り出す。
+ *
+ * 応答の中には次の並びが含まれる:
+ *   [長さ][応答コード 0x01][IDm 8バイト][PMm 8バイト](+[システムコード 2バイト])
+ *   長さは 0x14(20バイト) または 0x12(18バイト)
+ *
+ * 応答全体のバイト数は環境によって変わるため、固定位置で切り出さず
+ * この並びを先頭から探して取り出す（長さ判定より頑丈）。
+ */
+function extractIdm(res) {
+  for (let i = 0; i + 10 <= res.length; i++) {
+    if ((res[i] !== 0x14 && res[i] !== 0x12) || res[i + 1] !== 0x01) continue;
+    let idm = '';
+    for (let j = i + 2; j < i + 10; j++) idm += hex2(res[j]);
+    if (/^0+$/.test(idm)) continue; // 全ゼロは無効なIDmなので読み飛ばす
+    return idm;
+  }
+  return null;
 }
 
 // ---- 初期化 & 1回分のポーリング -------------------------------------
@@ -174,13 +210,16 @@ async function readOnce() {
 
   await send([0xff, 0x50, 0x00, 0x00, 0x02, 0x82, 0x00, 0x00]); await receive(); // end session
 
-  // カード検出時は 46バイト応答。IDm は 26〜33 バイト目。
-  if (res.length >= 34 && res.length === 46) {
-    let idm = '';
-    for (let i = 26; i < 34; i++) idm += hex2(res[i]);
-    return idm;
+  // デバッグ中は生の応答を画面に出す（内容が変わったときだけ／ログが流れないように）
+  if (debugMode) {
+    const hex = toHexString(res);
+    if (hex !== lastDebugHex) {
+      lastDebugHex = hex;
+      log(`応答 ${res.length}バイト: ${hex}`);
+    }
   }
-  return null;
+
+  return extractIdm(res);
 }
 
 // ---- ポーリングループ ------------------------------------------------
@@ -310,6 +349,13 @@ $('saveSettings').addEventListener('click', () => {
   log('GAS URL を保存しました');
 });
 $('closeSettings').addEventListener('click', () => $('settings').close());
+
+$('debugBtn').addEventListener('click', () => {
+  debugMode = !debugMode;
+  lastDebugHex = '';
+  $('debugBtn').textContent = debugMode ? 'デバッグOFF' : 'デバッグ';
+  log(debugMode ? 'デバッグ表示を開始（リーダーの応答を表示します）' : 'デバッグ表示を停止');
+});
 
 // WebUSB 非対応チェック
 if (!navigator.usb) {

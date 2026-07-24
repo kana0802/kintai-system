@@ -1,5 +1,5 @@
 // PWA用の最小Service Worker（アプリシェルをキャッシュしてインストール可能にする）
-const CACHE = 'attendance-v1';
+const CACHE = 'attendance-v2';
 const ASSETS = [
   './index.html',
   './app.js',
@@ -23,5 +23,17 @@ self.addEventListener('fetch', (e) => {
   const url = new URL(e.request.url);
   // GASなど外部への通信はキャッシュせず素通し
   if (url.origin !== self.location.origin) return;
-  e.respondWith(caches.match(e.request).then((r) => r || fetch(e.request)));
+
+  // ネットワーク優先（取れたら最新をキャッシュに保存）。
+  // 修正版をアップロードしたとき、古い画面が残り続けるのを防ぐため。
+  // 圏外・オフライン時のみキャッシュを使う。
+  e.respondWith(
+    fetch(e.request)
+      .then((res) => {
+        const copy = res.clone();
+        caches.open(CACHE).then((c) => c.put(e.request, copy)).catch(() => {});
+        return res;
+      })
+      .catch(() => caches.match(e.request))
+  );
 });
