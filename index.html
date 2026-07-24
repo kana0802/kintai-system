@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="theme-color" content="#0b3d66">
+<link rel="manifest" href="./manifest.webmanifest">
+<link rel="apple-touch-icon" href="./icon-192.png">
+<title>勤怠打刻</title>
+<style>
+  :root { --bg:#0b3d66; --accent:#2f8fd6; --in:#2fa84f; --out:#e08a2b; --ng:#d64545; --card:#123a5a; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html,body { margin:0; height:100%; }
+  body {
+    font-family: system-ui, "Hiragino Kaku Gothic ProN", "Noto Sans JP", sans-serif;
+    background: var(--bg); color:#fff; height:100dvh;
+    display:flex; flex-direction:column; overflow:hidden; user-select:none;
+  }
+  header {
+    display:flex; align-items:center; justify-content:space-between;
+    padding:10px 16px; background:rgba(0,0,0,.2);
+  }
+  header .title { font-size:18px; font-weight:700; }
+  header .clock { font-size:16px; font-variant-numeric:tabular-nums; opacity:.9; }
+  .main {
+    flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center;
+    gap:24px; padding:20px; text-align:center;
+  }
+  .status { font-size:clamp(24px, 5vw, 44px); font-weight:800; line-height:1.3; }
+
+  /* --- ①ボタン選択画面 --- */
+  .choose { display:flex; gap:24px; flex-wrap:wrap; justify-content:center; }
+  .bigbtn {
+    width:min(38vw,320px); height:min(38vw,320px); border:none; border-radius:28px;
+    color:#fff; font-size:clamp(32px,7vw,64px); font-weight:900;
+    box-shadow:0 10px 30px rgba(0,0,0,.35); transition:transform .1s;
+  }
+  .bigbtn:active { transform:scale(.96); }
+  .bigbtn.in  { background:var(--in); }
+  .bigbtn.out { background:var(--out); }
+  .bigbtn small { display:block; font-size:clamp(14px,2.5vw,20px); font-weight:700; opacity:.9; margin-top:6px; }
+
+  /* --- ②カードをかざす画面 --- */
+  .armed { display:none; flex-direction:column; align-items:center; gap:18px; }
+  .armed .badge {
+    padding:10px 28px; border-radius:999px; font-size:clamp(24px,5vw,40px); font-weight:900;
+  }
+  .armed .badge.in  { background:var(--in); }
+  .armed .badge.out { background:var(--out); }
+  .armed .tap { font-size:clamp(26px,6vw,52px); font-weight:800; }
+  .armed .count { font-size:16px; opacity:.8; }
+
+  /* --- ③結果パネル --- */
+  .card-panel {
+    display:none; background:var(--card); border-radius:20px; padding:28px 32px;
+    min-width:min(90vw,520px); box-shadow:0 10px 30px rgba(0,0,0,.3); transition:transform .15s, background .2s;
+  }
+  .card-panel.flash-ok { background:var(--in); transform:scale(1.03); }
+  .card-panel.flash-ng { background:var(--ng); }
+  .result-name { font-size:clamp(30px, 7vw, 64px); font-weight:800; }
+  .result-type { font-size:clamp(22px, 5vw, 40px); margin-top:6px; }
+  .result-time { font-size:clamp(16px, 3vw, 24px); margin-top:8px; opacity:.9; font-variant-numeric:tabular-nums; }
+
+  .cancel { background:#2a4d6e; color:#fff; border:none; border-radius:12px; padding:12px 24px; font-size:18px; font-weight:700; }
+
+  footer { padding:10px 16px; background:rgba(0,0,0,.25); display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  button.foot { font-size:15px; padding:10px 16px; border-radius:12px; border:none; background:var(--accent); color:#fff; font-weight:700; }
+  button.foot:disabled { opacity:.4; }
+  button.foot.secondary { background:#2a4d6e; }
+  .conn-dot { width:12px; height:12px; border-radius:50%; background:var(--ng); display:inline-block; }
+  .conn-dot.on { background:var(--in); }
+  .log { max-height:100px; overflow:auto; width:100%; font-size:13px; opacity:.85; }
+  .log div { padding:2px 0; font-variant-numeric:tabular-nums; }
+  dialog { border:none; border-radius:16px; padding:20px; background:var(--card); color:#fff; max-width:90vw; }
+  dialog input { width:100%; margin:8px 0 16px; padding:10px 12px; border-radius:10px; border:1px solid #3a5f80; background:#0e2c46; color:#fff; font-size:14px; }
+  .row { display:flex; gap:10px; }
+</style>
+</head>
+<body>
+<header>
+  <div class="title">勤怠打刻</div>
+  <div class="clock" id="clock">--:--:--</div>
+</header>
+
+<div class="main">
+  <div class="status" id="status">打刻の種類を選んでください</div>
+
+  <!-- ① 出勤／退勤の選択 -->
+  <div class="choose" id="choose">
+    <button class="bigbtn in"  id="btnIn">出勤<small>しゅっきん</small></button>
+    <button class="bigbtn out" id="btnOut">退勤<small>たいきん</small></button>
+  </div>
+
+  <!-- ② カードをかざす案内 -->
+  <div class="armed" id="armed">
+    <div class="badge" id="armedBadge">出勤</div>
+    <div class="tap">カードをかざしてください</div>
+    <div class="count" id="count"></div>
+    <button class="cancel" id="cancelBtn">キャンセル</button>
+  </div>
+
+  <!-- ③ 結果表示 -->
+  <div class="card-panel" id="panel">
+    <div class="result-name" id="rName">—</div>
+    <div class="result-type" id="rType"></div>
+    <div class="result-time" id="rTime"></div>
+  </div>
+</div>
+
+<footer>
+  <span class="conn-dot" id="dot"></span>
+  <span id="connLabel">未接続</span>
+  <button class="foot" id="connectBtn">リーダーに接続</button>
+  <button class="foot secondary" id="settingsBtn">設定</button>
+  <div class="log" id="log"></div>
+</footer>
+
+<dialog id="settings">
+  <div style="font-weight:700; font-size:16px; margin-bottom:8px;">設定</div>
+  <label style="font-size:14px;">GAS WebアプリのURL（/exec で終わるもの）</label>
+  <input id="gasUrl" type="url" placeholder="https://script.google.com/macros/s/XXXX/exec">
+  <div class="row">
+    <button class="foot" id="saveSettings">保存</button>
+    <button class="foot secondary" id="closeSettings">閉じる</button>
+  </div>
+</dialog>
+
+<script src="./app.js"></script>
+</body>
+</html>
