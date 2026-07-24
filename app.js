@@ -36,7 +36,8 @@ let uiState = 'idle';
 let selectedType = '';      // '出勤' | '退勤'
 let armTimer = null;        // かざし待ちの自動キャンセル用タイマー
 let countTimer = null;      // 残り秒数カウントダウン
-const ARM_TIMEOUT_SEC = 15; // ボタンを押してからカード待ちの制限時間
+const ARM_TIMEOUT_SEC = 30; // ボタンを押してからカード待ちの制限時間
+const SEND_TIMEOUT_SEC = 20; // GASからの応答を待つ制限時間（無応答で固まるのを防ぐ）
 
 const $ = (id) => document.getElementById(id);
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
@@ -294,7 +295,7 @@ async function onCardDetected(idm) {
     log('種別未選択のため無視（先に出勤/退勤を押す）');
     return;
   }
-  if (navigator.vibrate) navigator.vibrate(80);
+  if (navigator.vibrate) { try { navigator.vibrate(80); } catch (e) { /* 非対応端末は無視 */ } }
 
   const url = getGasUrl();
   if (!url) {
@@ -302,20 +303,50 @@ async function onCardDetected(idm) {
     return;
   }
 
+  // カードを読めた時点で「かざし待ち」は完了。
+  // GASの応答が遅くても「時間切れ」にならないよう、ここでカウントダウンを止める。
+  clearArmTimers();
+  $('count').textContent = '';
+  $('status').textContent = '記録しています…';
+  log('GASへ送信中…');
+
   const type = selectedType;
+
+  // 応答が返らないまま固まるのを防ぐため制限時間を設ける
+  const ctrl = new AbortController();
+  const abortTimer = setTimeout(() => ctrl.abort(), SEND_TIMEOUT_SEC * 1000);
+
   try {
     // Content-Type を text/plain にして CORS プリフライトを回避（GASはe.postData.contentsで受け取れる）
     const resp = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
       body: JSON.stringify({ idm, type }),
+      signal: ctrl.signal,
     });
-    const data = await resp.json();
+
+    // JSON以外（ログイン画面のHTMLなど）が返ることがあるため、
+    // 先に文字列で受け取ってから解釈し、失敗時は中身を表示して原因を追えるようにする
+    const text = await resp.text();
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch (e) {
+      log(`GASの応答が想定外(HTTP ${resp.status}): ${text.slice(0, 150)}`);
+      showResult({ ok: false, message: `GASの応答が不正です（HTTP ${resp.status}）` });
+      return;
+    }
+
     showResult(data);
     log('送信結果: ' + JSON.stringify(data));
   } catch (err) {
-    showResult({ ok: false, message: '送信失敗: ' + err.message });
-    log('送信失敗: ' + err.message);
+    const msg = (err.name === 'AbortError')
+      ? `GASから${SEND_TIMEOUT_SEC}秒以内に応答がありません`
+      : '送信失敗: ' + err.message;
+    showResult({ ok: false, message: msg });
+    log(msg);
+  } finally {
+    clearTimeout(abortTimer);
   }
 }
 
