@@ -353,42 +353,60 @@ async function pollLoop() {
   }
 }
 
-// ---- GASへのGET通信（打刻・登録 共通） -------------------------------
-// GAS WebアプリはPOSTだとCORSで弾かれるため、全てGETのクエリで送る。
-// paramsObj 例: { idm, type } / { action:'register', idm, name }
-async function gasRequest(paramsObj) {
-  const url = getGasUrl();
-  if (!url) return { ok: false, message: 'GASのURLが未設定です（設定から入力）' };
+// ---- GASへの通信（打刻・登録 共通） ----------------------------------
+//
+// fetch ではなく <script> タグで呼び出す（JSONP）。
+// Googleアカウントにログイン中のブラウザだと、GASの応答が組織専用のアドレス
+// （script.googleusercontent.com/a/macros/<ドメイン>/echo）へ転送され、
+// そこが外部サイトからの読み取りを許可しないため fetch が遮断される。
+// <script> タグでの読み込みはこの制限を受けないので、ログイン状態に左右されない。
+//
+// paramsObj 例: { idm, type } / { action:'register', idm, name, staffId }
+let jsonpSeq = 0;
 
-  // 合言葉が設定されていれば一緒に送る（GAS側が未設定なら無視される）
-  const params = Object.assign({}, paramsObj);
-  const token = getGasToken();
-  if (token) params.token = token;
+function gasRequest(paramsObj) {
+  return new Promise((resolve) => {
+    const url = getGasUrl();
+    if (!url) { resolve({ ok: false, message: 'GASのURLが未設定です（設定から入力）' }); return; }
 
-  const qs = Object.entries(params)
-    .map(([k, v]) => encodeURIComponent(k) + '=' + encodeURIComponent(v))
-    .join('&');
+    const cbName = '__gasCb' + (++jsonpSeq);
+    const params = Object.assign({}, paramsObj);
+    // 合言葉が設定されていれば一緒に送る（GAS側が未設定なら無視される）
+    const token = getGasToken();
+    if (token) params.token = token;
+    params.callback = cbName;
 
-  // 応答が返らないまま固まるのを防ぐため制限時間を設ける
-  const ctrl = new AbortController();
-  const abortTimer = setTimeout(() => ctrl.abort(), SEND_TIMEOUT_SEC * 1000);
-  try {
-    const resp = await fetch(url + '?' + qs, { method: 'GET', signal: ctrl.signal });
-    const text = await resp.text();
-    try {
-      return JSON.parse(text);
-    } catch (e) {
-      log(`GASの応答が想定外(HTTP ${resp.status}): ${text.slice(0, 150)}`);
-      return { ok: false, message: `GASの応答が不正です（HTTP ${resp.status}）` };
-    }
-  } catch (err) {
-    const msg = (err.name === 'AbortError')
-      ? `GASから${SEND_TIMEOUT_SEC}秒以内に応答がありません`
-      : '送信失敗: ' + err.message;
-    return { ok: false, message: msg };
-  } finally {
-    clearTimeout(abortTimer);
-  }
+    const qs = Object.entries(params)
+      .map(([k, v]) => encodeURIComponent(k) + '=' + encodeURIComponent(v))
+      .join('&');
+
+    const script = document.createElement('script');
+    let settled = false;
+
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      delete window[cbName];
+      if (script.parentNode) script.parentNode.removeChild(script);
+      resolve(result);
+    };
+
+    // 応答が返らないまま固まるのを防ぐため制限時間を設ける
+    const timer = setTimeout(
+      () => finish({ ok: false, message: `GASから${SEND_TIMEOUT_SEC}秒以内に応答がありません` }),
+      SEND_TIMEOUT_SEC * 1000
+    );
+
+    window[cbName] = (data) => finish(data);
+    script.onerror = () => finish({
+      ok: false,
+      message: 'GASへの通信に失敗しました（設定のURLと公開設定を確認してください）',
+    });
+
+    script.src = url + '?' + qs;
+    document.head.appendChild(script);
+  });
 }
 
 // ---- カード検出時 ----------------------------------------------------
@@ -579,28 +597,15 @@ $('testBtn').addEventListener('click', async () => {
     log('⚠ URLの形が想定と違います。正しくは script.google.com/macros/s/.../exec で終わる形です');
   }
 
-  // ① まずGET（doGet）で疎通を確認
-  try {
-    log('テスト①GET送信中…');
-    const r = await fetch(url, { method: 'GET' });
-    const t = await r.text();
-    log(`テスト①GET成功 HTTP${r.status}: ${t.slice(0, 120)}`);
-  } catch (e) {
-    log('テスト①GET失敗: ' + e.message);
-  }
+  // ① 稼働確認（実際の打刻と同じ経路で送る）
+  log('テスト①稼働確認 送信中…');
+  const r1 = await gasRequest({});
+  log('テスト①結果: ' + JSON.stringify(r1));
 
-  // ② 実際の打刻と同じGET送信（ダミーIDm）で確認
-  try {
-    log('テスト②送信中…');
-    const tk = getGasToken();
-    const testUrl = url + '?idm=TESTCARD00000001&type=' + encodeURIComponent('出勤')
-      + (tk ? '&token=' + encodeURIComponent(tk) : '');
-    const r = await fetch(testUrl, { method: 'GET' });
-    const t = await r.text();
-    log(`テスト②成功 HTTP${r.status}: ${t.slice(0, 120)}`);
-  } catch (e) {
-    log('テスト②失敗: ' + e.message);
-  }
+  // ② 実際の打刻と同じ内容（ダミーIDm）で確認
+  log('テスト②ダミー打刻 送信中…');
+  const r2 = await gasRequest({ idm: 'TESTCARD00000001', type: '出勤' });
+  log('テスト②結果: ' + JSON.stringify(r2));
 });
 
 $('debugBtn').addEventListener('click', () => {

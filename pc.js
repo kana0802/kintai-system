@@ -57,37 +57,57 @@ function tickClock() {
 setInterval(tickClock, 1000); tickClock();
 
 // ---- GASへの通信 -----------------------------------------------------
-// GAS WebアプリはPOSTだとCORSで弾かれるため、すべてGETのクエリで送る。
-async function gasRequest(paramsObj) {
-  const url = getGasUrl();
-  if (!url) return { ok: false, message: 'GASのURLが未設定です（右下の「設定」から入力してください）' };
+//
+// fetch ではなく <script> タグで呼び出す（JSONP）。
+// Googleアカウントにログイン中のブラウザだと、GASの応答が組織専用のアドレスへ
+// 転送され、そこが外部サイトからの読み取りを許可しないため fetch は遮断される
+// （Failed to fetch）。<script> タグでの読み込みはこの制限を受けない。
+let jsonpSeq = 0;
 
-  const params = Object.assign({}, paramsObj);
-  const token = getGasToken();
-  if (token) params.token = token;
-
-  const qs = Object.entries(params)
-    .map(([k, v]) => encodeURIComponent(k) + '=' + encodeURIComponent(v))
-    .join('&');
-
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), SEND_TIMEOUT_SEC * 1000);
-  try {
-    const resp = await fetch(url + '?' + qs, { method: 'GET', signal: ctrl.signal });
-    const text = await resp.text();
-    try {
-      return JSON.parse(text);
-    } catch (e) {
-      return { ok: false, message: `GASの応答が不正です（HTTP ${resp.status}）` };
+function gasRequest(paramsObj) {
+  return new Promise((resolve) => {
+    const url = getGasUrl();
+    if (!url) {
+      resolve({ ok: false, message: 'GASのURLが未設定です（右下の「設定」から入力してください）' });
+      return;
     }
-  } catch (err) {
-    const msg = (err.name === 'AbortError')
-      ? `GASから${SEND_TIMEOUT_SEC}秒以内に応答がありません`
-      : '通信に失敗しました: ' + err.message;
-    return { ok: false, message: msg };
-  } finally {
-    clearTimeout(timer);
-  }
+
+    const cbName = '__gasCb' + (++jsonpSeq);
+    const params = Object.assign({}, paramsObj);
+    const token = getGasToken();
+    if (token) params.token = token;
+    params.callback = cbName;
+
+    const qs = Object.entries(params)
+      .map(([k, v]) => encodeURIComponent(k) + '=' + encodeURIComponent(v))
+      .join('&');
+
+    const script = document.createElement('script');
+    let settled = false;
+
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      delete window[cbName];
+      if (script.parentNode) script.parentNode.removeChild(script);
+      resolve(result);
+    };
+
+    const timer = setTimeout(
+      () => finish({ ok: false, message: `GASから${SEND_TIMEOUT_SEC}秒以内に応答がありません` }),
+      SEND_TIMEOUT_SEC * 1000
+    );
+
+    window[cbName] = (data) => finish(data);
+    script.onerror = () => finish({
+      ok: false,
+      message: 'GASへの通信に失敗しました（URLと公開設定を確認してください）',
+    });
+
+    script.src = url + '?' + qs;
+    document.head.appendChild(script);
+  });
 }
 
 // ---- グローバルIPの取得 ----------------------------------------------
