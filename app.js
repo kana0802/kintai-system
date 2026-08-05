@@ -42,11 +42,22 @@ const SEND_TIMEOUT_SEC = 20; // GASからの応答を待つ制限時間（無応
 
 const $ = (id) => document.getElementById(id);
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+// 画面(index.html)が古いキャッシュのままでも落ちないようにするための入れ物。
+// 後から追加した入力欄（職員番号・合言葉）は、古い画面には存在しないため
+// そのまま触ると例外になり、以降の処理がすべて止まってしまう。
+const elVal    = (id) => { const el = $(id); return el ? el.value : ''; };
+const setElVal = (id, v) => { const el = $(id); if (el) el.value = v; };
+const onEl     = (id, ev, fn) => { const el = $(id); if (el) el.addEventListener(ev, fn); };
 const hex2 = (v) => ('0' + (v & 0xff).toString(16).toUpperCase()).slice(-2);
 
-// ---- 設定（GAS URL） -------------------------------------------------
+// ---- 設定（GAS URL / 合言葉） ----------------------------------------
 function getGasUrl() { return localStorage.getItem('gasUrl') || ''; }
 function setGasUrl(u) { localStorage.setItem('gasUrl', u); }
+// 合言葉。GASで setupToken() を実行して発行した文字列を入れる。
+// GAS側が未設定のうちは空欄のままでも動く。
+function getGasToken() { return localStorage.getItem('gasToken') || ''; }
+function setGasToken(t) { localStorage.setItem('gasToken', t); }
 
 // ---- 時計表示 --------------------------------------------------------
 function tickClock() {
@@ -349,7 +360,12 @@ async function gasRequest(paramsObj) {
   const url = getGasUrl();
   if (!url) return { ok: false, message: 'GASのURLが未設定です（設定から入力）' };
 
-  const qs = Object.entries(paramsObj)
+  // 合言葉が設定されていれば一緒に送る（GAS側が未設定なら無視される）
+  const params = Object.assign({}, paramsObj);
+  const token = getGasToken();
+  if (token) params.token = token;
+
+  const qs = Object.entries(params)
     .map(([k, v]) => encodeURIComponent(k) + '=' + encodeURIComponent(v))
     .join('&');
 
@@ -443,6 +459,7 @@ function enrollCapture(idm) {
   $('status').textContent = '';
   $('enrollIdm').textContent = idm;
   $('enrollName').value = '';
+  setElVal('enrollStaffId', '');
   $('enrollDlg').showModal();
   setTimeout(() => $('enrollName').focus(), 50);
   if (navigator.vibrate) { try { navigator.vibrate(80); } catch (e) {} }
@@ -452,11 +469,13 @@ function enrollCapture(idm) {
 async function enrollSubmit() {
   const name = $('enrollName').value.trim();
   if (!name) { alert('氏名を入力してください'); return; }
+  // 職員番号はPC打刻の一覧で同姓同名を見分けるために使う（未入力でも登録はできる）
+  const staffId = elVal('enrollStaffId').trim();
   const idm = enrollIdm;
   $('enrollDlg').close();
 
   $('status').textContent = '登録しています…';
-  const data = await gasRequest({ action: 'register', idm: idm, name: name });
+  const data = await gasRequest({ action: 'register', idm: idm, name: name, staffId: staffId });
   log('登録結果: ' + JSON.stringify(data));
 
   if (data.ok) {
@@ -528,16 +547,24 @@ $('connectBtn').addEventListener('click', connect);
 $('enrollBtn').addEventListener('click', toEnroll);
 $('enrollSave').addEventListener('click', enrollSubmit);
 $('enrollCancel').addEventListener('click', () => { $('enrollDlg').close(); toIdle(); });
-$('enrollName').addEventListener('keydown', (e) => { if (e.key === 'Enter') enrollSubmit(); });
+$('enrollName').addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter') return;
+  const sid = $('enrollStaffId');
+  if (sid) sid.focus(); else enrollSubmit();
+});
+onEl('enrollStaffId', 'keydown', (e) => { if (e.key === 'Enter') enrollSubmit(); });
 
 $('settingsBtn').addEventListener('click', () => {
   $('gasUrl').value = getGasUrl();
+  setElVal('gasToken', getGasToken());
   $('settings').showModal();
 });
 $('saveSettings').addEventListener('click', () => {
   setGasUrl($('gasUrl').value.trim());
+  // 古い画面には合言葉欄が無い。その場合に空文字で上書きすると保存済みの合言葉が消えるので触らない。
+  if ($('gasToken')) setGasToken(elVal('gasToken').trim());
   $('settings').close();
-  log('GAS URL を保存しました');
+  log('設定を保存しました');
 });
 $('closeSettings').addEventListener('click', () => $('settings').close());
 
@@ -565,7 +592,9 @@ $('testBtn').addEventListener('click', async () => {
   // ② 実際の打刻と同じGET送信（ダミーIDm）で確認
   try {
     log('テスト②送信中…');
-    const testUrl = url + '?idm=TESTCARD00000001&type=' + encodeURIComponent('出勤');
+    const tk = getGasToken();
+    const testUrl = url + '?idm=TESTCARD00000001&type=' + encodeURIComponent('出勤')
+      + (tk ? '&token=' + encodeURIComponent(tk) : '');
     const r = await fetch(testUrl, { method: 'GET' });
     const t = await r.text();
     log(`テスト②成功 HTTP${r.status}: ${t.slice(0, 120)}`);

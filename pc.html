@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#0b3d66">
+<title>勤怠打刻（PC）</title>
+<style>
+  :root { --bg:#0b3d66; --accent:#2f8fd6; --in:#2fa84f; --out:#e08a2b; --ng:#d64545; --card:#123a5a; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; height:100%; }
+  body {
+    font-family: system-ui, "Hiragino Kaku Gothic ProN", "Noto Sans JP", sans-serif;
+    background: var(--bg); color:#fff; min-height:100dvh;
+    display:flex; flex-direction:column;
+  }
+  header {
+    display:flex; align-items:center; justify-content:space-between;
+    padding:12px 20px; background:rgba(0,0,0,.2);
+  }
+  header .title { font-size:18px; font-weight:700; }
+  header .clock { font-size:18px; font-variant-numeric:tabular-nums; opacity:.9; }
+
+  .main { flex:1; display:flex; flex-direction:column; align-items:center; padding:20px; gap:16px; }
+  .panel { width:100%; max-width:640px; }
+  .status { font-size:20px; font-weight:700; text-align:center; min-height:28px; }
+
+  /* --- ① 氏名の選択 --- */
+  input[type="search"], input[type="text"], input[type="url"] {
+    width:100%; padding:14px 16px; font-size:18px; border-radius:12px;
+    border:1px solid #3a5f80; background:#0e2c46; color:#fff;
+  }
+  input::placeholder { color:#7fa3c0; }
+  .stafflist {
+    margin-top:12px; max-height:52vh; overflow:auto;
+    border:1px solid #2a4d6e; border-radius:12px; background:#0e2c46;
+  }
+  .staffitem {
+    display:flex; align-items:center; justify-content:space-between; gap:12px;
+    width:100%; padding:14px 16px; border:none; border-bottom:1px solid #1d3f5e;
+    background:transparent; color:#fff; font-size:18px; text-align:left; cursor:pointer;
+  }
+  .staffitem:last-child { border-bottom:none; }
+  .staffitem:hover, .staffitem:focus { background:#164667; outline:none; }
+  .staffitem .sid { font-size:15px; opacity:.75; font-variant-numeric:tabular-nums; white-space:nowrap; }
+  .empty { padding:20px; text-align:center; opacity:.8; }
+
+  /* --- ② 出勤／退勤の選択 --- */
+  .who {
+    background:var(--card); border-radius:16px; padding:20px; text-align:center; margin-bottom:20px;
+  }
+  .who .nm { font-size:32px; font-weight:800; }
+  .who .sid { font-size:18px; opacity:.8; margin-top:4px; font-variant-numeric:tabular-nums; }
+  .choose { display:flex; gap:20px; justify-content:center; flex-wrap:wrap; }
+  .bigbtn {
+    width:220px; height:150px; border:none; border-radius:20px; color:#fff;
+    font-size:40px; font-weight:900; cursor:pointer;
+    box-shadow:0 10px 30px rgba(0,0,0,.35); transition:transform .1s;
+  }
+  .bigbtn:active { transform:scale(.96); }
+  .bigbtn.in { background:var(--in); }
+  .bigbtn.out { background:var(--out); }
+  .bigbtn small { display:block; font-size:16px; font-weight:700; opacity:.9; margin-top:6px; }
+
+  /* --- ③ 結果 --- */
+  .result {
+    background:var(--card); border-radius:16px; padding:32px; text-align:center;
+  }
+  .result.ok { background:var(--in); }
+  .result.ng { background:var(--ng); }
+  .result .nm { font-size:36px; font-weight:800; }
+  .result .tp { font-size:26px; margin-top:8px; }
+  .result .tm { font-size:20px; margin-top:8px; opacity:.9; font-variant-numeric:tabular-nums; }
+
+  button.act {
+    font-size:16px; padding:12px 22px; border-radius:12px; border:none;
+    background:var(--accent); color:#fff; font-weight:700; cursor:pointer;
+  }
+  button.act.secondary { background:#2a4d6e; }
+  .center { text-align:center; margin-top:20px; }
+
+  footer {
+    padding:10px 20px; background:rgba(0,0,0,.25);
+    display:flex; gap:14px; align-items:center; flex-wrap:wrap; font-size:14px;
+  }
+  footer .spacer { flex:1; }
+  .ipbadge { opacity:.85; font-variant-numeric:tabular-nums; }
+  dialog { border:none; border-radius:16px; padding:24px; background:var(--card); color:#fff; max-width:90vw; width:520px; }
+  dialog label { font-size:14px; display:block; margin-top:12px; margin-bottom:6px; }
+  dialog .row { display:flex; gap:10px; margin-top:20px; }
+  .hint { font-size:13px; opacity:.75; margin-top:8px; line-height:1.6; }
+</style>
+</head>
+<body>
+<header>
+  <div class="title">勤怠打刻（PC）</div>
+  <div class="clock" id="clock">--:--:--</div>
+</header>
+
+<div class="main">
+  <div class="status" id="status">読み込み中...</div>
+
+  <!-- ① 氏名を選ぶ -->
+  <div class="panel" id="selectView">
+    <input type="search" id="search" placeholder="氏名 または 職員番号で絞り込み" autocomplete="off">
+    <div class="stafflist" id="stafflist"></div>
+  </div>
+
+  <!-- ② 出勤／退勤を選ぶ -->
+  <div class="panel" id="typeView" style="display:none;">
+    <div class="who">
+      <div class="nm" id="whoName">—</div>
+      <div class="sid" id="whoId"></div>
+    </div>
+    <div class="choose">
+      <button class="bigbtn in"  id="btnIn">出勤<small>しゅっきん</small></button>
+      <button class="bigbtn out" id="btnOut">退勤<small>たいきん</small></button>
+    </div>
+    <div class="center"><button class="act secondary" id="btnBack">← 氏名を選び直す</button></div>
+  </div>
+
+  <!-- ③ 結果 -->
+  <div class="panel" id="resultView" style="display:none;">
+    <div class="result" id="resultBox">
+      <div class="nm" id="rName">—</div>
+      <div class="tp" id="rType"></div>
+      <div class="tm" id="rTime"></div>
+    </div>
+    <div class="center"><button class="act" id="btnDone">続けて打刻する</button></div>
+  </div>
+</div>
+
+<footer>
+  <span class="ipbadge" id="ipLabel">接続元を確認中...</span>
+  <span class="spacer"></span>
+  <button class="act secondary" id="reloadBtn">職員一覧を更新</button>
+  <button class="act secondary" id="settingsBtn">設定</button>
+</footer>
+
+<dialog id="settings">
+  <div style="font-weight:700; font-size:18px;">設定</div>
+  <label for="gasUrl">GAS WebアプリのURL（/exec で終わるもの）</label>
+  <input id="gasUrl" type="url" placeholder="https://script.google.com/macros/s/XXXX/exec">
+  <label for="gasToken">合言葉（GASで setupToken を実行して発行した文字列）</label>
+  <input id="gasToken" type="text" placeholder="合言葉を設定していない場合は空欄のまま" autocomplete="off">
+  <div class="hint">
+    配布用リンクの形にしておくと、職員側はここを入力せずに使えます：<br>
+    <code>（このページのURL）?u=（GASのURL）&amp;t=（合言葉）</code>
+  </div>
+  <div class="row">
+    <button class="act" id="saveSettings">保存</button>
+    <button class="act secondary" id="closeSettings">閉じる</button>
+  </div>
+</dialog>
+
+<script src="./pc.js"></script>
+</body>
+</html>
