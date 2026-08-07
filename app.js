@@ -46,9 +46,16 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 // 画面(index.html)が古いキャッシュのままでも落ちないようにするための入れ物。
 // 後から追加した入力欄（職員番号・合言葉）は、古い画面には存在しないため
 // そのまま触ると例外になり、以降の処理がすべて止まってしまう。
-const elVal    = (id) => { const el = $(id); return el ? el.value : ''; };
-const setElVal = (id, v) => { const el = $(id); if (el) el.value = v; };
-const onEl     = (id, ev, fn) => { const el = $(id); if (el) el.addEventListener(ev, fn); };
+const elVal     = (id) => { const el = $(id); return el ? el.value : ''; };
+const setElVal  = (id, v) => { const el = $(id); if (el) el.value = v; };
+const setElText = (id, v) => { const el = $(id); if (el) el.textContent = v; };
+const onEl      = (id, ev, fn) => { const el = $(id); if (el) el.addEventListener(ev, fn); };
+
+// 打刻できたときに画面へ出すひとこと。打刻種別ごとに変える。
+const GREETINGS = {
+  '出勤': '本日もよろしくお願いします',
+  '退勤': 'お疲れさまでした',
+};
 const hex2 = (v) => ('0' + (v & 0xff).toString(16).toUpperCase()).slice(-2);
 
 // ---- 設定（GAS URL / 合言葉） ----------------------------------------
@@ -260,6 +267,7 @@ function toIdle() {
   $('armed').style.display  = 'none';
   $('panel').style.display  = 'none';
   $('panel').classList.remove('flash-ok', 'flash-ng');
+  setElText('rMsg', ''); // 前の人へのひとことが残らないようにする
 }
 
 /** ②種別を選んで「カードをかざしてください」画面へ */
@@ -310,22 +318,27 @@ function showResult(data) {
   panel.style.display = 'block';
 
   if (data.ok && !data.duplicated) {
+    const type = data.type || selectedType || '';
     $('status').textContent = '打刻しました';
     $('rName').textContent = data.name ? data.name : '（未登録カード）';
-    $('rType').textContent = data.type || selectedType || '';
+    $('rType').textContent = type;
     $('rTime').textContent = data.time || '';
+    // 打刻できたときだけ、出勤/退勤に応じたひとことを出す
+    setElText('rMsg', GREETINGS[type] || '');
     panel.classList.remove('flash-ng'); panel.classList.add('flash-ok');
     beepOk();
   } else if (data.ok && data.duplicated) {
     $('status').textContent = '連続打刻のためスキップ';
     $('rName').textContent = data.name || '';
     $('rType').textContent = ''; $('rTime').textContent = '';
+    setElText('rMsg', '');
     panel.classList.remove('flash-ok'); panel.classList.add('flash-ng');
     beepSkip();
   } else {
     $('status').textContent = 'エラー';
     $('rName').textContent = data.message || '不明なエラー';
     $('rType').textContent = ''; $('rTime').textContent = '';
+    setElText('rMsg', '');
     panel.classList.remove('flash-ok'); panel.classList.add('flash-ng');
     beepNg();
   }
