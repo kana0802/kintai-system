@@ -209,7 +209,12 @@ function tone(freq, dur, delay, gain) {
 // ただし実際に声が出るかは端末しだい（日本語の読み上げデータが入っていること）。
 // 使えない端末では黙って何もしない。画面には文字が出るので支障はない。
 
-let jaVoice = null;   // 日本語の声（見つからなければ端末の既定にまかせる）
+let jaVoice = null;      // 日本語の声（見つからなければ端末の既定にまかせる）
+let lastCancelAt = 0;    // 直前に読み上げを止めた時刻
+
+// 読み上げを止めた直後は、Chromeが次の読み上げを取りこぼす。
+// この時間だけ間を空けてから読み上げると確実に声が出る。
+const SPEAK_AFTER_CANCEL_MS = 150;
 
 function pickVoice() {
   try {
@@ -224,25 +229,68 @@ if (window.speechSynthesis) {
   window.speechSynthesis.onvoiceschanged = pickVoice;
 }
 
-/** 文字を読み上げる */
+/**
+ * 文字を読み上げる。
+ *
+ * 注意: ここで speechSynthesis.cancel() を呼んではいけない。
+ * Chrome には cancel() の直後の speak() が無視される不具合があり、
+ * 「何も言わない」状態になる。前の読み上げを止めるのは stopSpeaking() の役目。
+ */
 function speak(text) {
   if (!text || !soundEnabled()) return;
-  if (!window.speechSynthesis || !window.SpeechSynthesisUtterance) return;
+  if (!window.speechSynthesis || !window.SpeechSynthesisUtterance) {
+    log('読み上げ: この端末は読み上げ機能に対応していません');
+    return;
+  }
   try {
-    window.speechSynthesis.cancel();   // 前の読み上げが残っていれば止める
+    const synth = window.speechSynthesis;
+    if (synth.paused) synth.resume(); // 一時停止したまま止まっていることがある
+
     const u = new window.SpeechSynthesisUtterance(text);
     u.lang = 'ja-JP';
     if (jaVoice) u.voice = jaVoice;
     u.rate = 1.0;
     u.pitch = 1.0;
     u.volume = 1.0;
-    window.speechSynthesis.speak(u);
-  } catch (e) { /* 読み上げできなくても打刻は続行する */ }
+    // 実際に声が出たかどうかを画面のログで分かるようにする（原因調査用）
+    u.onstart = () => log('読み上げ: 開始「' + text + '」');
+    u.onend   = () => log('読み上げ: 終了');
+    u.onerror = (e) => log('読み上げ: 失敗（' + ((e && e.error) ? e.error : '原因不明') + '）');
+
+    // 止めた直後だと取りこぼされるので、そのときだけ少し間を置いてから読み上げる
+    const since = Date.now() - lastCancelAt;
+    if (since < SPEAK_AFTER_CANCEL_MS) {
+      setTimeout(() => { try { synth.speak(u); } catch (err) {} }, SPEAK_AFTER_CANCEL_MS - since);
+    } else {
+      synth.speak(u);
+    }
+  } catch (e) {
+    log('読み上げ: 失敗（' + e.message + '）');
+  }
+}
+
+/** 読み上げの利用状況を調べて画面のログに出す（声が出ないときの原因調査用） */
+function reportSpeechStatus() {
+  if (!window.speechSynthesis || !window.SpeechSynthesisUtterance) {
+    log('読み上げ調査: この端末は読み上げ機能に対応していません');
+    return;
+  }
+  let list = [];
+  try { list = window.speechSynthesis.getVoices() || []; } catch (e) {}
+  const ja = list.filter(v => /^ja/i.test(v.lang));
+  log('読み上げ調査: 使える声 ' + list.length + '種類 / うち日本語 ' + ja.length + '種類');
+  if (ja.length) log('読み上げ調査: 日本語の声「' + ja[0].name + '」を使います');
+  else if (list.length) log('読み上げ調査: 日本語の声がありません（端末の「テキスト読み上げ」設定を確認）');
+  else log('読み上げ調査: 声が1つも見つかりません（端末に読み上げエンジンが無い可能性）');
 }
 
 /** 読み上げを止める（次の人の操作が始まったとき） */
 function stopSpeaking() {
-  try { if (window.speechSynthesis) window.speechSynthesis.cancel(); } catch (e) {}
+  try {
+    if (!window.speechSynthesis) return;
+    window.speechSynthesis.cancel();
+    lastCancelAt = Date.now();
+  } catch (e) {}
 }
 
 /** カードを読めた合図（いちばんよく通る高さ） */
@@ -882,10 +930,17 @@ onEl('soundTestBtn', 'click', async () => {
   if (!soundEnabled()) { alert('いまは音なしの設定です。左の音量ボタンで音を出す設定にしてください。'); return; }
   soundTesting = true;
   unlockAudio();
+
+  // まず読み上げの状況を調べて、ボタンを押したその場で読み上げてみる。
+  // （待ち時間を置かずに試すことで、「操作直後でないと声が出ない」端末かどうかも分かる）
+  reportSpeechStatus();
+  speak('読み上げのテストです');
+  await sleep(2600);
+
   const items = [
     ['① カードを読めたとき',     () => beepRead(), 1200],
-    ['② 出勤の打刻ができたとき', () => { beepOk(); setTimeout(() => speak(GREETINGS['出勤']), SPEAK_DELAY_MS); }, 3500],
-    ['③ 退勤の打刻ができたとき', () => { beepOk(); setTimeout(() => speak(GREETINGS['退勤']), SPEAK_DELAY_MS); }, 3000],
+    ['② 出勤の打刻ができたとき', () => { beepOk(); setTimeout(() => speak(GREETINGS['出勤']), SPEAK_DELAY_MS); }, 3800],
+    ['③ 退勤の打刻ができたとき', () => { beepOk(); setTimeout(() => speak(GREETINGS['退勤']), SPEAK_DELAY_MS); }, 3200],
     ['④ 連続打刻のとき',         () => beepSkip(), 1400],
     ['⑤ エラーのとき（警告音）', () => beepNg(),   2200],
   ];
@@ -894,7 +949,6 @@ onEl('soundTestBtn', 'click', async () => {
     play();
     await sleep(waitMs);
   }
-  if (!window.speechSynthesis) log('※この端末は読み上げに対応していません（音だけ鳴ります）');
   log('音を聞く: 終わりました');
   soundTesting = false;
 });
