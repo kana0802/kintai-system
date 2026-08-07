@@ -194,32 +194,6 @@ function tone(freq, dur, delay, gain) {
   } catch (e) { /* 音が出せなくても打刻は続行する */ }
 }
 
-/**
- * 高さが下がっていく音を鳴らす（tone の変化する版）。
- * まっすぐな音とは明らかに違って聞こえるので、異常を知らせるのに使う。
- */
-function toneSlide(freqFrom, freqTo, dur, delay, gain) {
-  if (!audioCtx || !audioBus || !soundEnabled()) return;
-  try {
-    const peak = ((gain === undefined) ? 0.9 : gain) * volGain();
-    if (peak <= 0) return;
-
-    const t0 = audioCtx.currentTime + (delay || 0);
-    const osc = audioCtx.createOscillator();
-    const amp = audioCtx.createGain();
-    osc.type = 'square';
-    osc.frequency.setValueAtTime(freqFrom, t0);
-    osc.frequency.exponentialRampToValueAtTime(freqTo, t0 + dur);
-    amp.gain.setValueAtTime(0.0001, t0);
-    amp.gain.exponentialRampToValueAtTime(peak, t0 + 0.006);
-    amp.gain.setValueAtTime(peak, t0 + Math.max(dur - 0.05, 0.02)); // 途中で痩せないよう保つ
-    amp.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
-    osc.connect(amp); amp.connect(audioBus);
-    osc.start(t0);
-    osc.stop(t0 + dur + 0.03);
-  } catch (e) { /* 音が出せなくても打刻は続行する */ }
-}
-
 /** カードを読めた合図（いちばんよく通る高さ） */
 function beepRead() { tone(2600, 0.11, 0, 1.0); }
 
@@ -247,17 +221,26 @@ function beepOk() { tone(2000, 0.13, 0, 1.0); tone(2800, 0.28, 0.14, 1.0); }
 function beepSkip() { tone(1800, 0.12, 0, 0.9); tone(1800, 0.12, 0.18, 0.9); }
 
 /**
- * エラー（打刻できなかった）。
+ * エラー（打刻できなかった）＝ 警告音。
  *
- * 他の音はすべて「まっすぐな短い音」だが、これだけは高さが下がっていく音を
- * 3回くり返す。長さも約1.2秒と他より明らかに長い。
+ * 2つの高さを息つぎなしで交互にくり返す、サイレン型の警告音。
+ * 救急車や医療機器のアラームと同じ作りで、「異常」だと直感的に伝わる。
+ *
+ * 2音の高さの比を約1.41倍（増四度）にしてあるのがポイント。
+ * この組み合わせは不安定に響き、人が落ち着かない音として警報によく使われる。
  * 打刻できていないのに気づかず立ち去るのが一番困るため、
- * 聞き逃さないよう、はっきり違う音にしてある。
+ * 他の音（一瞬で終わる短い音）とは明らかに違う、長く鳴り続ける音にしている。
  */
+const NG_HI = 1245;      // 高いほう
+const NG_LO = 880;       // 低いほう（1245 ÷ 880 ≒ 1.41 の関係）
+const NG_STEP = 0.13;    // 1音の長さ（秒）
+const NG_COUNT = 10;     // 交互に鳴らす回数（全体で約1.3秒）
+
 function beepNg() {
-  toneSlide(1400, 620, 0.30, 0.00, 1.0);
-  toneSlide(1400, 620, 0.30, 0.38, 1.0);
-  toneSlide(1400, 620, 0.42, 0.76, 1.0); // 最後だけ長く引く
+  for (let i = 0; i < NG_COUNT; i++) {
+    // 音と音のあいだにわずかな切れ目を作る（続けて鳴らすと「プツッ」と鳴るため）
+    tone(i % 2 === 0 ? NG_HI : NG_LO, NG_STEP * 0.92, i * NG_STEP, 1.0);
+  }
 }
 
 // ==== 画面遷移 =========================================================
@@ -825,6 +808,29 @@ onEl('soundBtn', 'click', () => {
   log('音量を「' + VOL_STEPS[next].label.replace(/^\S+\s*/, '') + '」にしました');
 });
 refreshSoundBtn();
+
+// 4種類の音を順に鳴らして、実際の聞こえ方を確かめるためのボタン。
+// エラー音はわざと失敗させないと聞けないため、ここで確認できるようにしてある。
+let soundTesting = false;
+onEl('soundTestBtn', 'click', async () => {
+  if (soundTesting) return;
+  if (!soundEnabled()) { alert('いまは音なしの設定です。左の音量ボタンで音を出す設定にしてください。'); return; }
+  soundTesting = true;
+  unlockAudio();
+  const items = [
+    ['① カードを読めたとき', beepRead, 1200],
+    ['② 打刻できたとき',     beepOk,   1400],
+    ['③ 連続打刻のとき',     beepSkip, 1400],
+    ['④ エラーのとき（警告音）', beepNg, 2200],
+  ];
+  for (const [label, play, waitMs] of items) {
+    log('音を聞く: ' + label);
+    play();
+    await sleep(waitMs);
+  }
+  log('音を聞く: 終わりました');
+  soundTesting = false;
+});
 
 $('debugBtn').addEventListener('click', () => {
   debugMode = !debugMode;
