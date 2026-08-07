@@ -89,13 +89,25 @@ function log(msg) {
 //
 // つまり「音が鳴っている間は待つ」「音が止まったら終わり」で判断できる。
 //
-// 音の作り方について:
-//   タブレットの小さなスピーカーは低い音をほとんど鳴らせない。
-//   そのため低音は使わず、耳に届きやすい 1000Hz 前後を中心に、
-//   倍音を多く含む矩形波（square）を使う。同じ音量でも格段に聞こえやすい。
+// 音の作り方について（タブレットで大きく聞こえるようにするための工夫）:
+//   1. 低音を使わない
+//      小さなスピーカーは低い音をほとんど鳴らせない。
+//   2. 高さを 1500〜3000Hz にそろえる
+//      人の耳はこのあたりが最も敏感で、同じ音量でもいちばん大きく聞こえる。
+//      タブレットのスピーカーもこの範囲がよく鳴る。
+//   3. 矩形波（square）を使う
+//      倍音を多く含むので、同じ音量でも通る音になる。
+//   4. コンプレッサーを通してから増幅する
+//      音の大きい部分だけ自動で抑えてくれるので、
+//      全体を持ち上げても音が割れない。これがいちばん効く。
 
 let audioCtx = null;
+let audioBus = null;    // 各音の入り口（コンプレッサー）
 let waitingTimer = null;
+
+// コンプレッサーを通したあとに全体を何倍にするか。
+// 音が割れる寸前まで上げてある。これ以上は歪みが目立つ。
+const MASTER_MAKEUP = 1.8;
 
 // 音量の段階。ボタンを押すたびにこの順で切り替わる。
 const VOL_STEPS = [
@@ -128,7 +140,32 @@ function unlockAudio() {
       audioCtx = new Ctx();
     }
     if (audioCtx.state === 'suspended') audioCtx.resume();
-  } catch (e) { audioCtx = null; }
+    if (!audioBus) audioBus = buildAudioBus();
+  } catch (e) { audioCtx = null; audioBus = null; }
+}
+
+/**
+ * 音の通り道を作る:  各音 → コンプレッサー → 増幅 → スピーカー
+ *
+ * コンプレッサーが大きすぎる部分だけ自動的に抑えてくれるので、
+ * そのあとで全体を持ち上げても音が割れない。
+ * 単純に音量を上げるより、はっきり大きく聞こえる。
+ */
+function buildAudioBus() {
+  if (!audioCtx.createDynamicsCompressor) return audioCtx.destination; // 非対応ならそのまま鳴らす
+  const comp = audioCtx.createDynamicsCompressor();
+  comp.threshold.value = -22;  // この大きさを超えた分を抑える
+  comp.knee.value = 6;
+  comp.ratio.value = 12;
+  comp.attack.value = 0.003;
+  comp.release.value = 0.15;
+
+  const makeup = audioCtx.createGain();
+  makeup.gain.value = MASTER_MAKEUP;
+
+  comp.connect(makeup);
+  makeup.connect(audioCtx.destination);
+  return comp;
 }
 
 /**
@@ -138,9 +175,9 @@ function unlockAudio() {
  * 音量を短時間で上げ下げしている。
  */
 function tone(freq, dur, delay, gain) {
-  if (!audioCtx || !soundEnabled()) return;
+  if (!audioCtx || !audioBus || !soundEnabled()) return;
   try {
-    const peak = ((gain === undefined) ? 0.6 : gain) * volGain();
+    const peak = ((gain === undefined) ? 0.9 : gain) * volGain();
     if (peak <= 0) return;
 
     const t0 = audioCtx.currentTime + (delay || 0);
@@ -149,26 +186,26 @@ function tone(freq, dur, delay, gain) {
     osc.type = 'square';  // 矩形波。小さなスピーカーでも聞き取りやすい
     osc.frequency.value = freq;
     amp.gain.setValueAtTime(0.0001, t0);
-    amp.gain.exponentialRampToValueAtTime(peak, t0 + 0.008);
+    amp.gain.exponentialRampToValueAtTime(peak, t0 + 0.006);
     amp.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
-    osc.connect(amp); amp.connect(audioCtx.destination);
+    osc.connect(amp); amp.connect(audioBus);
     osc.start(t0);
     osc.stop(t0 + dur + 0.03);
   } catch (e) { /* 音が出せなくても打刻は続行する */ }
 }
 
-/** カードを読めた合図（一番よく通る高さ） */
-function beepRead() { tone(1600, 0.10, 0, 0.75); }
+/** カードを読めた合図（いちばんよく通る高さ） */
+function beepRead() { tone(2600, 0.11, 0, 1.0); }
 
 /**
  * 待っている間ずっと鳴らす。
  * 出勤/退勤を押した時点から鳴りはじめ、記録が終わったら stopWaiting() で止める。
- * ずっと聞くことになるので、合図の音より控えめにする。
+ * ずっと聞くことになるので、合図の音より少し控えめにする。
  */
 function startWaiting() {
   stopWaiting();
   if (!audioCtx || !soundEnabled()) return;
-  const tick = () => tone(950, 0.07, 0, 0.30);
+  const tick = () => tone(1500, 0.08, 0, 0.62);
   tick();
   waitingTimer = setInterval(tick, 700);
 }
@@ -178,13 +215,13 @@ function stopWaiting() {
 }
 
 /** 打刻できた（上がる2音） */
-function beepOk() { tone(1200, 0.12, 0, 0.7); tone(1800, 0.26, 0.13, 0.7); }
+function beepOk() { tone(2000, 0.13, 0, 1.0); tone(2800, 0.28, 0.14, 1.0); }
 
 /** 連続打刻でスキップした（同じ高さで2回） */
-function beepSkip() { tone(1000, 0.11, 0, 0.6); tone(1000, 0.11, 0.17, 0.6); }
+function beepSkip() { tone(1800, 0.12, 0, 0.9); tone(1800, 0.12, 0.18, 0.9); }
 
-/** エラー（低めの音を3回。低音はタブレットで鳴らないため使わない） */
-function beepNg() { tone(500, 0.13, 0, 0.75); tone(500, 0.13, 0.18, 0.75); tone(500, 0.13, 0.36, 0.75); }
+/** エラー（低めの音を3回。ただし低すぎるとタブレットでは鳴らないので700Hz） */
+function beepNg() { tone(700, 0.14, 0, 1.0); tone(700, 0.14, 0.19, 1.0); tone(700, 0.14, 0.38, 1.0); }
 
 // ==== 画面遷移 =========================================================
 
