@@ -194,6 +194,32 @@ function tone(freq, dur, delay, gain) {
   } catch (e) { /* 音が出せなくても打刻は続行する */ }
 }
 
+/**
+ * 高さが下がっていく音を鳴らす（tone の変化する版）。
+ * まっすぐな音とは明らかに違って聞こえるので、異常を知らせるのに使う。
+ */
+function toneSlide(freqFrom, freqTo, dur, delay, gain) {
+  if (!audioCtx || !audioBus || !soundEnabled()) return;
+  try {
+    const peak = ((gain === undefined) ? 0.9 : gain) * volGain();
+    if (peak <= 0) return;
+
+    const t0 = audioCtx.currentTime + (delay || 0);
+    const osc = audioCtx.createOscillator();
+    const amp = audioCtx.createGain();
+    osc.type = 'square';
+    osc.frequency.setValueAtTime(freqFrom, t0);
+    osc.frequency.exponentialRampToValueAtTime(freqTo, t0 + dur);
+    amp.gain.setValueAtTime(0.0001, t0);
+    amp.gain.exponentialRampToValueAtTime(peak, t0 + 0.006);
+    amp.gain.setValueAtTime(peak, t0 + Math.max(dur - 0.05, 0.02)); // 途中で痩せないよう保つ
+    amp.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    osc.connect(amp); amp.connect(audioBus);
+    osc.start(t0);
+    osc.stop(t0 + dur + 0.03);
+  } catch (e) { /* 音が出せなくても打刻は続行する */ }
+}
+
 /** カードを読めた合図（いちばんよく通る高さ） */
 function beepRead() { tone(2600, 0.11, 0, 1.0); }
 
@@ -220,8 +246,19 @@ function beepOk() { tone(2000, 0.13, 0, 1.0); tone(2800, 0.28, 0.14, 1.0); }
 /** 連続打刻でスキップした（同じ高さで2回） */
 function beepSkip() { tone(1800, 0.12, 0, 0.9); tone(1800, 0.12, 0.18, 0.9); }
 
-/** エラー（低めの音を3回。ただし低すぎるとタブレットでは鳴らないので700Hz） */
-function beepNg() { tone(700, 0.14, 0, 1.0); tone(700, 0.14, 0.19, 1.0); tone(700, 0.14, 0.38, 1.0); }
+/**
+ * エラー（打刻できなかった）。
+ *
+ * 他の音はすべて「まっすぐな短い音」だが、これだけは高さが下がっていく音を
+ * 3回くり返す。長さも約1.2秒と他より明らかに長い。
+ * 打刻できていないのに気づかず立ち去るのが一番困るため、
+ * 聞き逃さないよう、はっきり違う音にしてある。
+ */
+function beepNg() {
+  toneSlide(1400, 620, 0.30, 0.00, 1.0);
+  toneSlide(1400, 620, 0.30, 0.38, 1.0);
+  toneSlide(1400, 620, 0.42, 0.76, 1.0); // 最後だけ長く引く
+}
 
 // ==== 画面遷移 =========================================================
 
