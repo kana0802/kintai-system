@@ -51,11 +51,13 @@ const setElVal  = (id, v) => { const el = $(id); if (el) el.value = v; };
 const setElText = (id, v) => { const el = $(id); if (el) el.textContent = v; };
 const onEl      = (id, ev, fn) => { const el = $(id); if (el) el.addEventListener(ev, fn); };
 
-// 打刻できたときに画面へ出すひとこと。打刻種別ごとに変える。
+// 打刻できたときに画面へ出す（そして読み上げる）ひとこと。打刻種別ごとに変える。
 const GREETINGS = {
   '出勤': '本日もよろしくお願いします',
   '退勤': 'お疲れさまでした',
 };
+// 完了音（約0.4秒）と重ならないよう、これだけ置いてから読み上げる
+const SPEAK_DELAY_MS = 500;
 const hex2 = (v) => ('0' + (v & 0xff).toString(16).toUpperCase()).slice(-2);
 
 // ---- 設定（GAS URL / 合言葉） ----------------------------------------
@@ -201,6 +203,48 @@ function tone(freq, dur, delay, gain) {
   } catch (e) { /* 音が出せなくても打刻は続行する */ }
 }
 
+// ---- 読み上げ（打刻後のひとことを声で伝える） ------------------------
+//
+// ブラウザの読み上げ機能を使うので、音声ファイルは要らない。
+// ただし実際に声が出るかは端末しだい（日本語の読み上げデータが入っていること）。
+// 使えない端末では黙って何もしない。画面には文字が出るので支障はない。
+
+let jaVoice = null;   // 日本語の声（見つからなければ端末の既定にまかせる）
+
+function pickVoice() {
+  try {
+    const list = window.speechSynthesis.getVoices() || [];
+    jaVoice = list.filter(v => /^ja/i.test(v.lang))[0] || null;
+  } catch (e) { jaVoice = null; }
+}
+
+// 声の一覧は少し遅れて用意されることがあるため、届いた時点で選び直す
+if (window.speechSynthesis) {
+  pickVoice();
+  window.speechSynthesis.onvoiceschanged = pickVoice;
+}
+
+/** 文字を読み上げる */
+function speak(text) {
+  if (!text || !soundEnabled()) return;
+  if (!window.speechSynthesis || !window.SpeechSynthesisUtterance) return;
+  try {
+    window.speechSynthesis.cancel();   // 前の読み上げが残っていれば止める
+    const u = new window.SpeechSynthesisUtterance(text);
+    u.lang = 'ja-JP';
+    if (jaVoice) u.voice = jaVoice;
+    u.rate = 1.0;
+    u.pitch = 1.0;
+    u.volume = 1.0;
+    window.speechSynthesis.speak(u);
+  } catch (e) { /* 読み上げできなくても打刻は続行する */ }
+}
+
+/** 読み上げを止める（次の人の操作が始まったとき） */
+function stopSpeaking() {
+  try { if (window.speechSynthesis) window.speechSynthesis.cancel(); } catch (e) {}
+}
+
 /** カードを読めた合図（いちばんよく通る高さ） */
 function beepRead() { tone(2600, 0.11, 0, 1.0); }
 
@@ -273,7 +317,8 @@ function toIdle() {
 /** ②種別を選んで「カードをかざしてください」画面へ */
 function toArmed(type) {
   if (!device || !polling) { alert('先にリーダーへ接続してください'); return; }
-  unlockAudio(); // ボタンを押した「今」なら音を鳴らせる状態にできる
+  unlockAudio();   // ボタンを押した「今」なら音を鳴らせる状態にできる
+  stopSpeaking();  // 前の人へのひとことが残っていれば止める
   clearArmTimers();
   uiState = 'armed';
   selectedType = type;
@@ -324,9 +369,12 @@ function showResult(data) {
     $('rType').textContent = type;
     $('rTime').textContent = data.time || '';
     // 打刻できたときだけ、出勤/退勤に応じたひとことを出す
-    setElText('rMsg', GREETINGS[type] || '');
+    const greeting = GREETINGS[type] || '';
+    setElText('rMsg', greeting);
     panel.classList.remove('flash-ng'); panel.classList.add('flash-ok');
     beepOk();
+    // 完了音と重ならないよう、少し置いてから読み上げる
+    if (greeting) setTimeout(() => speak(greeting), SPEAK_DELAY_MS);
   } else if (data.ok && data.duplicated) {
     $('status').textContent = '連続打刻のためスキップ';
     $('rName').textContent = data.name || '';
@@ -639,6 +687,7 @@ let enrollIdm = '';
 function toEnroll() {
   if (!device || !polling) { alert('先にリーダーへ接続してください'); return; }
   unlockAudio();
+  stopSpeaking();
   clearArmTimers();
   uiState = 'enroll';
   lastIdm = '';
@@ -820,7 +869,7 @@ onEl('soundBtn', 'click', () => {
   setSoundLevel(next);
   refreshSoundBtn();
   if (next > 0) { unlockAudio(); beepOk(); } // 実際に鳴らして音量を確かめられるように
-  else stopWaiting();
+  else { stopWaiting(); stopSpeaking(); }
   log('音量を「' + VOL_STEPS[next].label.replace(/^\S+\s*/, '') + '」にしました');
 });
 refreshSoundBtn();
@@ -834,16 +883,18 @@ onEl('soundTestBtn', 'click', async () => {
   soundTesting = true;
   unlockAudio();
   const items = [
-    ['① カードを読めたとき', beepRead, 1200],
-    ['② 打刻できたとき',     beepOk,   1400],
-    ['③ 連続打刻のとき',     beepSkip, 1400],
-    ['④ エラーのとき（警告音）', beepNg, 2200],
+    ['① カードを読めたとき',     () => beepRead(), 1200],
+    ['② 出勤の打刻ができたとき', () => { beepOk(); setTimeout(() => speak(GREETINGS['出勤']), SPEAK_DELAY_MS); }, 3500],
+    ['③ 退勤の打刻ができたとき', () => { beepOk(); setTimeout(() => speak(GREETINGS['退勤']), SPEAK_DELAY_MS); }, 3000],
+    ['④ 連続打刻のとき',         () => beepSkip(), 1400],
+    ['⑤ エラーのとき（警告音）', () => beepNg(),   2200],
   ];
   for (const [label, play, waitMs] of items) {
     log('音を聞く: ' + label);
     play();
     await sleep(waitMs);
   }
+  if (!window.speechSynthesis) log('※この端末は読み上げに対応していません（音だけ鳴ります）');
   log('音を聞く: 終わりました');
   soundTesting = false;
 });
