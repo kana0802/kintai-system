@@ -83,17 +83,41 @@ function log(msg) {
 // ブラウザは「利用者が操作する前」には音を出せない決まりなので、
 // 出勤/退勤ボタンや接続ボタンを押した時点で鳴らせる状態にする（unlockAudio）。
 //
-//   カード読取   … ピッ（短い高音1回）
-//   記録中       … コッ、コッ…（待っている間くり返す。これが「何待ちか」の合図）
-//   打刻できた   … ピンポーン（上がる2音）
-//   連続打刻     … ププッ（同じ高さで2回）
-//   エラー       … ブー（低い音）
+//   出勤/退勤を押す … コッ、コッ…（ここから鳴りはじめる）
+//   カード読取       … ピッ（読めた合図。くり返し音は続く）
+//   記録が終わる     … 結果の音を鳴らして、くり返し音を止める
+//
+// つまり「音が鳴っている間は待つ」「音が止まったら終わり」で判断できる。
+//
+// 音の作り方について:
+//   タブレットの小さなスピーカーは低い音をほとんど鳴らせない。
+//   そのため低音は使わず、耳に届きやすい 1000Hz 前後を中心に、
+//   倍音を多く含む矩形波（square）を使う。同じ音量でも格段に聞こえやすい。
 
 let audioCtx = null;
 let waitingTimer = null;
 
-function soundEnabled() { return localStorage.getItem('soundOff') !== '1'; }
-function setSoundEnabled(on) { localStorage.setItem('soundOff', on ? '0' : '1'); }
+// 音量の段階。ボタンを押すたびにこの順で切り替わる。
+const VOL_STEPS = [
+  { label: '🔇 音なし', gain: 0 },
+  { label: '🔈 音 小', gain: 0.35 },
+  { label: '🔊 音 中', gain: 0.65 },
+  { label: '📢 音 大', gain: 1.0 },
+];
+const VOL_DEFAULT = 3; // 既定は「大」
+
+/** 現在の音量段階（0=音なし 〜 3=大） */
+function soundLevel() {
+  const raw = localStorage.getItem('soundLevel');
+  // 以前の ON/OFF だけの設定から引き継ぐ
+  if (raw === null) return (localStorage.getItem('soundOff') === '1') ? 0 : VOL_DEFAULT;
+  const n = parseInt(raw, 10);
+  return (n >= 0 && n < VOL_STEPS.length) ? n : VOL_DEFAULT;
+}
+function setSoundLevel(n) { localStorage.setItem('soundLevel', String(n)); }
+function soundEnabled() { return soundLevel() > 0; }
+/** 音量のかけ算係数 */
+function volGain() { return VOL_STEPS[soundLevel()].gain; }
 
 /** 音を鳴らせる状態にする（利用者の操作の中から呼ぶこと） */
 function unlockAudio() {
@@ -116,14 +140,16 @@ function unlockAudio() {
 function tone(freq, dur, delay, gain) {
   if (!audioCtx || !soundEnabled()) return;
   try {
+    const peak = ((gain === undefined) ? 0.6 : gain) * volGain();
+    if (peak <= 0) return;
+
     const t0 = audioCtx.currentTime + (delay || 0);
     const osc = audioCtx.createOscillator();
     const amp = audioCtx.createGain();
-    osc.type = 'sine';
+    osc.type = 'square';  // 矩形波。小さなスピーカーでも聞き取りやすい
     osc.frequency.value = freq;
-    const peak = (gain === undefined) ? 0.25 : gain;
     amp.gain.setValueAtTime(0.0001, t0);
-    amp.gain.exponentialRampToValueAtTime(peak, t0 + 0.012);
+    amp.gain.exponentialRampToValueAtTime(peak, t0 + 0.008);
     amp.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
     osc.connect(amp); amp.connect(audioCtx.destination);
     osc.start(t0);
@@ -131,14 +157,18 @@ function tone(freq, dur, delay, gain) {
   } catch (e) { /* 音が出せなくても打刻は続行する */ }
 }
 
-/** カードを読めた合図 */
-function beepRead() { tone(1180, 0.09, 0, 0.3); }
+/** カードを読めた合図（一番よく通る高さ） */
+function beepRead() { tone(1600, 0.10, 0, 0.75); }
 
-/** 記録中: 待っている間ずっと鳴らす。応答が返ったら必ず stopWaiting() で止める */
+/**
+ * 待っている間ずっと鳴らす。
+ * 出勤/退勤を押した時点から鳴りはじめ、記録が終わったら stopWaiting() で止める。
+ * ずっと聞くことになるので、合図の音より控えめにする。
+ */
 function startWaiting() {
   stopWaiting();
   if (!audioCtx || !soundEnabled()) return;
-  const tick = () => tone(660, 0.06, 0, 0.14);  // 控えめな音量でくり返す
+  const tick = () => tone(950, 0.07, 0, 0.30);
   tick();
   waitingTimer = setInterval(tick, 700);
 }
@@ -148,13 +178,13 @@ function stopWaiting() {
 }
 
 /** 打刻できた（上がる2音） */
-function beepOk() { tone(880, 0.12, 0, 0.3); tone(1320, 0.22, 0.13, 0.3); }
+function beepOk() { tone(1200, 0.12, 0, 0.7); tone(1800, 0.26, 0.13, 0.7); }
 
 /** 連続打刻でスキップした（同じ高さで2回） */
-function beepSkip() { tone(760, 0.1, 0, 0.25); tone(760, 0.1, 0.16, 0.25); }
+function beepSkip() { tone(1000, 0.11, 0, 0.6); tone(1000, 0.11, 0.17, 0.6); }
 
-/** エラー（低い音） */
-function beepNg() { tone(240, 0.45, 0, 0.3); }
+/** エラー（低めの音を3回。低音はタブレットで鳴らないため使わない） */
+function beepNg() { tone(500, 0.13, 0, 0.75); tone(500, 0.13, 0.18, 0.75); tone(500, 0.13, 0.36, 0.75); }
 
 // ==== 画面遷移 =========================================================
 
@@ -189,6 +219,10 @@ function toArmed(type) {
   const badge = $('armedBadge');
   badge.textContent = type;
   badge.className = 'badge ' + (type === '出勤' ? 'in' : 'out');
+
+  // ボタンを押した時点から音を鳴らしはじめる。
+  // 記録が終わる（showResult）か、時間切れ・キャンセルで戻るまで鳴り続ける。
+  startWaiting();
 
   // 制限時間のカウントダウン（無操作なら自動でidleに戻す）
   let remain = ARM_TIMEOUT_SEC;
@@ -510,14 +544,14 @@ async function onCardDetected(idm) {
     return;
   }
   if (navigator.vibrate) { try { navigator.vibrate(80); } catch (e) { /* 非対応端末は無視 */ } }
-  beepRead(); // 「カードは読めました」の合図
+  beepRead(); // 「カードは読めました」の合図。くり返し音はそのまま続く
 
   // カードを読めた時点で「かざし待ち」は完了。
   // GASの応答が遅くても「時間切れ」にならないよう、ここでカウントダウンを止める。
+  // （くり返し音は clearArmTimers では止めない。記録が終わるまで鳴らし続ける）
   clearArmTimers();
   $('count').textContent = '';
   $('status').textContent = '記録しています…';
-  startWaiting(); // 応答が返るまで鳴らし続ける（カードを離してよいことが分かる）
   log('GASへ送信中…');
 
   const data = await gasRequest({ idm: idm, type: selectedType });
@@ -546,6 +580,8 @@ function toEnroll() {
   badge.textContent = '登録';
   badge.className = 'badge in';
 
+  startWaiting(); // 登録も「かざし待ち」なので同じように鳴らす
+
   // 無操作なら自動で選択画面に戻す
   let remain = ARM_TIMEOUT_SEC;
   $('count').textContent = `（${remain}秒以内にかざしてください）`;
@@ -559,6 +595,7 @@ function toEnroll() {
 /** 登録モードでカードを読めたら、氏名入力ダイアログを開く */
 function enrollCapture(idm) {
   clearArmTimers();
+  stopWaiting(); // 氏名を入力してもらう間は鳴らさない
   enrollIdm = idm;
   uiState = 'result'; // ダイアログ入力中は打刻・再検出をしない中立状態
   $('count').textContent = '';
@@ -699,18 +736,19 @@ $('testBtn').addEventListener('click', async () => {
   log('テスト②結果: ' + JSON.stringify(r2));
 });
 
-// 音のON/OFF（夜勤帯など、鳴らしたくない場面のため）。設定はこの端末に保存される。
+// 音量の切り替え。押すたびに 音なし → 小 → 中 → 大 → 音なし… と変わる。
+// 設定はこの端末に保存される（夜勤帯だけ音なしにする、といった使い方ができる）。
 function refreshSoundBtn() {
   const b = $('soundBtn');
-  if (b) b.textContent = soundEnabled() ? '🔊 音あり' : '🔇 音なし';
+  if (b) b.textContent = VOL_STEPS[soundLevel()].label;
 }
 onEl('soundBtn', 'click', () => {
-  const next = !soundEnabled();
-  setSoundEnabled(next);
+  const next = (soundLevel() + 1) % VOL_STEPS.length;
+  setSoundLevel(next);
   refreshSoundBtn();
-  if (next) { unlockAudio(); beepOk(); }   // ONにしたときは実際に鳴らして確認できるように
+  if (next > 0) { unlockAudio(); beepOk(); } // 実際に鳴らして音量を確かめられるように
   else stopWaiting();
-  log(next ? '音を鳴らす設定にしました' : '音を鳴らさない設定にしました');
+  log('音量を「' + VOL_STEPS[next].label.replace(/^\S+\s*/, '') + '」にしました');
 });
 refreshSoundBtn();
 
