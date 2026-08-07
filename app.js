@@ -77,11 +77,91 @@ function log(msg) {
   while ($('log').childElementCount > 30) $('log').lastChild.remove();
 }
 
+// ==== 音（打刻者に「今どの段階か」を耳で知らせる） =====================
+//
+// 音声ファイルは持たず、その場で音を合成する（追加ファイル不要・オフラインでも鳴る）。
+// ブラウザは「利用者が操作する前」には音を出せない決まりなので、
+// 出勤/退勤ボタンや接続ボタンを押した時点で鳴らせる状態にする（unlockAudio）。
+//
+//   カード読取   … ピッ（短い高音1回）
+//   記録中       … コッ、コッ…（待っている間くり返す。これが「何待ちか」の合図）
+//   打刻できた   … ピンポーン（上がる2音）
+//   連続打刻     … ププッ（同じ高さで2回）
+//   エラー       … ブー（低い音）
+
+let audioCtx = null;
+let waitingTimer = null;
+
+function soundEnabled() { return localStorage.getItem('soundOff') !== '1'; }
+function setSoundEnabled(on) { localStorage.setItem('soundOff', on ? '0' : '1'); }
+
+/** 音を鳴らせる状態にする（利用者の操作の中から呼ぶこと） */
+function unlockAudio() {
+  try {
+    if (!audioCtx) {
+      const Ctx = window.AudioContext || window['webkitAudioContext'];
+      if (!Ctx) return;               // 非対応の端末では音なしで動く
+      audioCtx = new Ctx();
+    }
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+  } catch (e) { audioCtx = null; }
+}
+
+/**
+ * 単音を鳴らす。
+ * delay 秒あとに freq ヘルツの音を dur 秒鳴らす。
+ * 音の出だしと終わりを滑らかにしないと「プツッ」というノイズが入るため、
+ * 音量を短時間で上げ下げしている。
+ */
+function tone(freq, dur, delay, gain) {
+  if (!audioCtx || !soundEnabled()) return;
+  try {
+    const t0 = audioCtx.currentTime + (delay || 0);
+    const osc = audioCtx.createOscillator();
+    const amp = audioCtx.createGain();
+    osc.type = 'sine';
+    osc.frequency.value = freq;
+    const peak = (gain === undefined) ? 0.25 : gain;
+    amp.gain.setValueAtTime(0.0001, t0);
+    amp.gain.exponentialRampToValueAtTime(peak, t0 + 0.012);
+    amp.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    osc.connect(amp); amp.connect(audioCtx.destination);
+    osc.start(t0);
+    osc.stop(t0 + dur + 0.03);
+  } catch (e) { /* 音が出せなくても打刻は続行する */ }
+}
+
+/** カードを読めた合図 */
+function beepRead() { tone(1180, 0.09, 0, 0.3); }
+
+/** 記録中: 待っている間ずっと鳴らす。応答が返ったら必ず stopWaiting() で止める */
+function startWaiting() {
+  stopWaiting();
+  if (!audioCtx || !soundEnabled()) return;
+  const tick = () => tone(660, 0.06, 0, 0.14);  // 控えめな音量でくり返す
+  tick();
+  waitingTimer = setInterval(tick, 700);
+}
+
+function stopWaiting() {
+  if (waitingTimer) { clearInterval(waitingTimer); waitingTimer = null; }
+}
+
+/** 打刻できた（上がる2音） */
+function beepOk() { tone(880, 0.12, 0, 0.3); tone(1320, 0.22, 0.13, 0.3); }
+
+/** 連続打刻でスキップした（同じ高さで2回） */
+function beepSkip() { tone(760, 0.1, 0, 0.25); tone(760, 0.1, 0.16, 0.25); }
+
+/** エラー（低い音） */
+function beepNg() { tone(240, 0.45, 0, 0.3); }
+
 // ==== 画面遷移 =========================================================
 
 /** ①出勤/退勤の選択画面に戻す */
 function toIdle() {
   clearArmTimers();
+  stopWaiting(); // どの経路で戻ってきても記録中の音を残さない
   uiState = 'idle';
   selectedType = '';
   lastIdm = '';
@@ -95,6 +175,7 @@ function toIdle() {
 /** ②種別を選んで「カードをかざしてください」画面へ */
 function toArmed(type) {
   if (!device || !polling) { alert('先にリーダーへ接続してください'); return; }
+  unlockAudio(); // ボタンを押した「今」なら音を鳴らせる状態にできる
   clearArmTimers();
   uiState = 'armed';
   selectedType = type;
@@ -127,6 +208,7 @@ function clearArmTimers() {
 /** ③結果を表示 → 一定時間後にidleへ */
 function showResult(data) {
   clearArmTimers();
+  stopWaiting(); // 応答が返ったので「記録中」の音を止める
   uiState = 'result';
   $('choose').style.display = 'none';
   $('armed').style.display  = 'none';
@@ -139,16 +221,19 @@ function showResult(data) {
     $('rType').textContent = data.type || selectedType || '';
     $('rTime').textContent = data.time || '';
     panel.classList.remove('flash-ng'); panel.classList.add('flash-ok');
+    beepOk();
   } else if (data.ok && data.duplicated) {
     $('status').textContent = '連続打刻のためスキップ';
     $('rName').textContent = data.name || '';
     $('rType').textContent = ''; $('rTime').textContent = '';
     panel.classList.remove('flash-ok'); panel.classList.add('flash-ng');
+    beepSkip();
   } else {
     $('status').textContent = 'エラー';
     $('rName').textContent = data.message || '不明なエラー';
     $('rType').textContent = ''; $('rTime').textContent = '';
     panel.classList.remove('flash-ok'); panel.classList.add('flash-ng');
+    beepNg();
   }
 
   setTimeout(toIdle, 3500);
@@ -425,12 +510,14 @@ async function onCardDetected(idm) {
     return;
   }
   if (navigator.vibrate) { try { navigator.vibrate(80); } catch (e) { /* 非対応端末は無視 */ } }
+  beepRead(); // 「カードは読めました」の合図
 
   // カードを読めた時点で「かざし待ち」は完了。
   // GASの応答が遅くても「時間切れ」にならないよう、ここでカウントダウンを止める。
   clearArmTimers();
   $('count').textContent = '';
   $('status').textContent = '記録しています…';
+  startWaiting(); // 応答が返るまで鳴らし続ける（カードを離してよいことが分かる）
   log('GASへ送信中…');
 
   const data = await gasRequest({ idm: idm, type: selectedType });
@@ -444,6 +531,7 @@ let enrollIdm = '';
 /** 登録モードに入る（カードをかざす待ち） */
 function toEnroll() {
   if (!device || !polling) { alert('先にリーダーへ接続してください'); return; }
+  unlockAudio();
   clearArmTimers();
   uiState = 'enroll';
   lastIdm = '';
@@ -481,6 +569,7 @@ function enrollCapture(idm) {
   $('enrollDlg').showModal();
   setTimeout(() => $('enrollName').focus(), 50);
   if (navigator.vibrate) { try { navigator.vibrate(80); } catch (e) {} }
+  beepRead();
 }
 
 /** 氏名を入力して「登録する」を押したとき */
@@ -493,6 +582,7 @@ async function enrollSubmit() {
   $('enrollDlg').close();
 
   $('status').textContent = '登録しています…';
+  startWaiting();
   const data = await gasRequest({ action: 'register', idm: idm, name: name, staffId: staffId });
   log('登録結果: ' + JSON.stringify(data));
 
@@ -505,6 +595,7 @@ async function enrollSubmit() {
 
 // ==== USB 接続処理 =====================================================
 async function connect() {
+  unlockAudio();
   try {
     // 既に許可済みのデバイスがあれば選択ダイアログ無しで使う
     const granted = await navigator.usb.getDevices();
@@ -607,6 +698,21 @@ $('testBtn').addEventListener('click', async () => {
   const r2 = await gasRequest({ idm: 'TESTCARD00000001', type: '出勤' });
   log('テスト②結果: ' + JSON.stringify(r2));
 });
+
+// 音のON/OFF（夜勤帯など、鳴らしたくない場面のため）。設定はこの端末に保存される。
+function refreshSoundBtn() {
+  const b = $('soundBtn');
+  if (b) b.textContent = soundEnabled() ? '🔊 音あり' : '🔇 音なし';
+}
+onEl('soundBtn', 'click', () => {
+  const next = !soundEnabled();
+  setSoundEnabled(next);
+  refreshSoundBtn();
+  if (next) { unlockAudio(); beepOk(); }   // ONにしたときは実際に鳴らして確認できるように
+  else stopWaiting();
+  log(next ? '音を鳴らす設定にしました' : '音を鳴らさない設定にしました');
+});
+refreshSoundBtn();
 
 $('debugBtn').addEventListener('click', () => {
   debugMode = !debugMode;
