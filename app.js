@@ -424,8 +424,9 @@ function showResult(data) {
 
   if (data.ok && !data.duplicated) {
     const type = data.type || selectedType || '';
-    $('status').textContent = '打刻しました';
-    $('rName').textContent = data.name ? data.name : '（未登録カード）';
+    // 未送信でも打刻はできている扱い。見た目と音は通常の打刻と同じにする。
+    $('status').textContent = data.queued ? '打刻しました（未送信）' : '打刻しました';
+    $('rName').textContent = data.name || (data.queued ? '打刻を受け付けました' : '（未登録カード）');
     $('rType').textContent = type;
     $('rTime').textContent = data.time || '';
     // 打刻できたときだけ、出勤/退勤に応じたひとことを出す
@@ -653,6 +654,136 @@ async function pollLoop() {
   }
 }
 
+// ==== 未送信の打刻（通信が切れている間の打刻を溜めて、つながったら送る）====
+//
+// タブレットは回線が切れていても画面が開きカードも読める（sw.js がキャッシュを持つ）。
+// 送信だけができないので、打刻を端末に溜めて、つながってから「いつ打刻したか」を
+// at に載せて送る。打刻した人は普段どおり完了音を聞いて立ち去れる。
+//
+// 溜まったまま同期されないと勤怠が欠けるので、未送信の件数は画面上部に出し続ける。
+// （職員ではなく、管理する人が気づくための表示）
+
+const QUEUE_KEY = 'punchQueue';
+const QUEUE_MAX = 500;            // 端末に溜める上限。超えたら古いものから捨てる
+const QUEUE_RETRY_MS = 60000;     // 未送信が残っている間、この間隔で送信を試す
+const NAME_CACHE_KEY = 'nameByIdm'; // オフラインでも氏名を出せるように控えておく
+
+let flushing = false;
+let queueTimer = null;
+
+function loadQueue() {
+  try {
+    const q = JSON.parse(localStorage.getItem(QUEUE_KEY) || '[]');
+    return Array.isArray(q) ? q : [];
+  } catch (e) { return []; }
+}
+
+function saveQueue(q) {
+  try { localStorage.setItem(QUEUE_KEY, JSON.stringify(q)); } catch (e) {}
+  refreshQueueBadge();
+}
+
+/** 打刻を端末に溜める */
+function enqueuePunch(item) {
+  const q = loadQueue();
+  q.push(item);
+  while (q.length > QUEUE_MAX) q.shift(); // 上限を超えたら古いものから捨てる
+  saveQueue(q);
+  log(`未送信として保存しました（${q.length}件）`);
+  scheduleQueueRetry();
+}
+
+/** 未送信の件数を画面上部に出す（0件なら消す） */
+function refreshQueueBadge() {
+  const el = $('queueBadge');
+  if (!el) return;
+  const n = loadQueue().length;
+  el.textContent = n ? `未送信 ${n}件` : '';
+  el.style.display = n ? 'inline-block' : 'none';
+}
+
+/** 未送信が残っている間だけ、定期的に送信を試す */
+function scheduleQueueRetry() {
+  if (queueTimer) return;
+  queueTimer = setInterval(() => {
+    if (!loadQueue().length) { clearInterval(queueTimer); queueTimer = null; return; }
+    flushQueue();
+  }, QUEUE_RETRY_MS);
+}
+
+/**
+ * 溜めた打刻を古いものから順に送る。
+ *
+ * 通信そのものが失敗したらそこで打ち切る（オフラインのまま残りを試しても無駄なため）。
+ * サーバーが受け付けなかった打刻は消さずに残す。勝手に捨てると勤怠が欠けるので、
+ * 未送信の件数として見え続けるようにしておく。
+ */
+async function flushQueue() {
+  if (flushing) return;
+  const queue = loadQueue();
+  if (!queue.length) return;
+
+  flushing = true;
+  log(`未送信 ${queue.length}件の送信を試します`);
+  let sent = 0;
+
+  try {
+    while (true) {
+      const q = loadQueue();
+      if (!q.length) break;
+      const item = q[0];
+
+      const res = await gasRequest({ idm: item.idm, type: item.type, at: item.at });
+
+      if (res.transport === false) {   // まだつながっていない
+        log('未送信の送信を中断しました（通信できません）');
+        break;
+      }
+
+      const rest = loadQueue();
+      if (res.ok) {
+        // duplicated（すでに届いていた）も送信済みとして扱う
+        rest.shift();
+        saveQueue(rest);
+        sent++;
+        if (res.name) rememberName(item.idm, res.name);
+      } else {
+        // サーバーが受け付けなかった。消さずに末尾へ回して次を試す。
+        item.tries = (item.tries || 0) + 1;
+        item.error = res.message || '';
+        rest.shift();
+        rest.push(item);
+        saveQueue(rest);
+        log('送信できない打刻があります: ' + item.error);
+        if (item.tries >= 3) break; // 一巡して直らないなら、いったんやめる
+      }
+    }
+  } finally {
+    flushing = false;
+    refreshQueueBadge();
+    const left = loadQueue().length;
+    if (sent) log(`未送信 ${sent}件を送信しました（残り ${left}件）`);
+    if (left) scheduleQueueRetry();
+  }
+}
+
+// ---- 氏名の控え（オフラインでも打刻した人の名前を出すため）-----------
+
+function loadNameCache() {
+  try { return JSON.parse(localStorage.getItem(NAME_CACHE_KEY) || '{}') || {}; }
+  catch (e) { return {}; }
+}
+
+function rememberName(idm, name) {
+  if (!idm || !name) return;
+  const c = loadNameCache();
+  if (c[idm] === name) return;
+  c[idm] = name;
+  try { localStorage.setItem(NAME_CACHE_KEY, JSON.stringify(c)); } catch (e) {}
+}
+
+function knownName(idm) { return loadNameCache()[idm] || ''; }
+
 // ---- GASへの通信（打刻・登録 共通） ----------------------------------
 //
 // fetch ではなく <script> タグで呼び出す（JSONP）。
@@ -667,7 +798,8 @@ let jsonpSeq = 0;
 function gasRequest(paramsObj) {
   return new Promise((resolve) => {
     const url = getGasUrl();
-    if (!url) { resolve({ ok: false, message: 'GASのURLが未設定です（設定から入力）' }); return; }
+    // transport:false は「GASまで届かなかった」印。未送信の打刻を捨てずに残す判断に使う。
+    if (!url) { resolve({ ok: false, transport: false, message: 'GASのURLが未設定です（設定から入力）' }); return; }
 
     const cbName = '__gasCb' + (++jsonpSeq);
     const params = Object.assign({}, paramsObj);
@@ -694,13 +826,14 @@ function gasRequest(paramsObj) {
 
     // 応答が返らないまま固まるのを防ぐため制限時間を設ける
     const timer = setTimeout(
-      () => finish({ ok: false, message: `GASから${SEND_TIMEOUT_SEC}秒以内に応答がありません` }),
+      () => finish({ ok: false, transport: false, message: `GASから${SEND_TIMEOUT_SEC}秒以内に応答がありません` }),
       SEND_TIMEOUT_SEC * 1000
     );
 
     window[cbName] = (data) => finish(data);
     script.onerror = () => finish({
       ok: false,
+      transport: false,
       message: 'GASへの通信に失敗しました（設定のURLと公開設定を確認してください）',
     });
 
@@ -733,6 +866,10 @@ async function onCardDetected(idm) {
   if (navigator.vibrate) { try { navigator.vibrate(80); } catch (e) { /* 非対応端末は無視 */ } }
   beepRead(); // 「カードは読めました」の合図。くり返し音はそのまま続く
 
+  // 打刻した時刻はここで押さえる。通信に手間取っても、送信できた時刻ではなく
+  // 実際にカードをかざした時刻が記録されるようにするため。
+  const punchedAt = new Date().toISOString();
+
   // カードを読めた時点で「かざし待ち」は完了。
   // GASの応答が遅くても「時間切れ」にならないよう、ここでカウントダウンを止める。
   // （くり返し音は clearArmTimers では止めない。記録が終わるまで鳴らし続ける）
@@ -742,8 +879,31 @@ async function onCardDetected(idm) {
   log('GASへ送信中…');
 
   const data = await gasRequest({ idm: idm, type: selectedType });
-  showResult(data);
   log('送信結果: ' + JSON.stringify(data));
+
+  // 通信が切れていた場合は、打刻を端末に溜めてから「打刻できた」として扱う。
+  // 打刻した人にできることは無いので、その場で警告するより、
+  // 未送信の件数を出し続けて管理する人が気づけるようにしている。
+  if (data.transport === false) {
+    enqueuePunch({ idm: idm, type: selectedType, at: punchedAt });
+    showResult({
+      ok: true, duplicated: false, queued: true,
+      name: knownName(idm), type: selectedType, time: localTimeText(punchedAt),
+    });
+    return;
+  }
+
+  if (data.ok && data.name) rememberName(idm, data.name);
+  showResult(data);
+  flushQueue(); // つながっているうちに、溜まっている分を送ってしまう
+}
+
+/** ISO文字列を画面表示用の 'yyyy-MM-dd HH:mm:ss'（端末の時刻）にする */
+function localTimeText(iso) {
+  const d = new Date(iso);
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ` +
+         `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
 // ---- 社員証の登録（新入職員用） -------------------------------------
@@ -1185,6 +1345,12 @@ if (!navigator.usb) {
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('./sw.js').catch(() => {});
 }
+
+// 未送信の打刻: 起動時に件数を出し、つながっていればまとめて送る
+refreshQueueBadge();
+if (loadQueue().length) { scheduleQueueRetry(); flushQueue(); }
+window.addEventListener('online', () => { log('通信が回復しました'); flushQueue(); });
+onEl('queueBadge', 'click', () => { log('未送信の送信を手動で試します'); flushQueue(); });
 
 // 初期表示
 toIdle();

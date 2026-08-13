@@ -21,7 +21,13 @@
     padding:10px 16px; background:rgba(0,0,0,.2);
   }
   header .title { font-size:18px; font-weight:700; }
+  header .right { display:flex; align-items:center; gap:12px; }
   header .clock { font-size:16px; font-variant-numeric:tabular-nums; opacity:.9; }
+  /* 未送信の打刻がある間だけ出る。職員ではなく管理する人が気づくための表示 */
+  header .queue {
+    background:var(--out); color:#fff; border:none; border-radius:999px;
+    padding:6px 14px; font-size:14px; font-weight:700;
+  }
   .main {
     flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center;
     gap:24px; padding:20px; text-align:center;
@@ -119,7 +125,10 @@
 <body>
 <header>
   <div class="title">勤怠打刻</div>
-  <div class="clock" id="clock">--:--:--</div>
+  <div class="right">
+    <button class="queue" id="queueBadge" type="button" style="display:none;"></button>
+    <div class="clock" id="clock">--:--:--</div>
+  </div>
 </header>
 
 <div class="main">
