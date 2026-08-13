@@ -30,15 +30,22 @@ let lastDebugHexF = '';     // FeliCa応答: 同じ内容を連続表示しな�
 let lastDebugHexA = '';     // MIFARE応答: 同上
 
 // ---- 画面の状態 -------------------------------------------------------
-// 'idle'   … 出勤/退勤ボタンの選択待ち
-// 'armed'  … 種別を選び、カードをかざす待ち
-// 'result' … 打刻結果の表示中
+// 'idle'    … 出勤/退勤ボタンの選択待ち
+// 'armed'   … 種別を選び、カードをかざす待ち
+// 'result'  … 打刻結果の表示中
+// 'enroll'  … 社員証の登録で、カードをかざす待ち
+// 'histArm' … 打刻履歴を見るために、カードをかざす待ち
+// 'history' … 打刻履歴の表示中
 let uiState = 'idle';
 let selectedType = '';      // '出勤' | '退勤'
 let armTimer = null;        // かざし待ちの自動キャンセル用タイマー
 let countTimer = null;      // 残り秒数カウントダウン
 const ARM_TIMEOUT_SEC = 30; // ボタンを押してからカード待ちの制限時間
 const SEND_TIMEOUT_SEC = 20; // GASからの応答を待つ制限時間（無応答で固まるのを防ぐ）
+
+// 履歴を開いたまま放置したときに自動で閉じるまでの秒数。
+// タブレットは共用なので、他人が来たときに前の人の勤怠が残っていない状態にする。
+const HISTORY_HOLD_SEC = 60;
 
 const $ = (id) => document.getElementById(id);
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
@@ -49,6 +56,7 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const elVal     = (id) => { const el = $(id); return el ? el.value : ''; };
 const setElVal  = (id, v) => { const el = $(id); if (el) el.value = v; };
 const setElText = (id, v) => { const el = $(id); if (el) el.textContent = v; };
+const setElDisp = (id, v) => { const el = $(id); if (el) el.style.display = v; };
 const onEl      = (id, ev, fn) => { const el = $(id); if (el) el.addEventListener(ev, fn); };
 
 // 打刻できたときに画面へ出す（そして読み上げる）ひとこと。打刻種別ごとに変える。
@@ -350,12 +358,14 @@ function beepNg() {
 /** ①出勤/退勤の選択画面に戻す */
 function toIdle() {
   clearArmTimers();
-  stopWaiting(); // どの経路で戻ってきても記録中の音を残さない
+  closeHistory();  // 前の人の勤怠を画面に残さない
+  stopWaiting();   // どの経路で戻ってきても記録中の音を残さない
   uiState = 'idle';
   selectedType = '';
   lastIdm = '';
   $('status').textContent = '打刻の種類を選んでください';
   $('choose').style.display = 'flex';
+  setElDisp('subActions', 'flex');
   $('armed').style.display  = 'none';
   $('panel').style.display  = 'none';
   $('panel').classList.remove('flash-ok', 'flash-ng');
@@ -374,6 +384,7 @@ function toArmed(type) {
 
   $('status').textContent = '';
   $('choose').style.display = 'none';
+  setElDisp('subActions', 'none');
   $('panel').style.display  = 'none';
   $('armed').style.display  = 'flex';
 
@@ -406,6 +417,7 @@ function showResult(data) {
   stopWaiting(); // 応答が返ったので「記録中」の音を止める
   uiState = 'result';
   $('choose').style.display = 'none';
+  setElDisp('subActions', 'none');
   $('armed').style.display  = 'none';
   const panel = $('panel');
   panel.style.display = 'block';
@@ -707,6 +719,12 @@ async function onCardDetected(idm) {
     return;
   }
 
+  // 履歴モード中はそのカードの持ち主の履歴を出す（打刻はしない）
+  if (uiState === 'histArm') {
+    await openHistory(idm);
+    return;
+  }
+
   // 出勤/退勤ボタンが押されていない間はカードを読んでも記録しない
   if (uiState !== 'armed') {
     log('種別未選択のため無視（先に出勤/退勤を押す）');
@@ -743,6 +761,7 @@ function toEnroll() {
 
   $('status').textContent = '登録：社員証をかざしてください';
   $('choose').style.display = 'none';
+  setElDisp('subActions', 'none');
   $('panel').style.display  = 'none';
   $('armed').style.display  = 'flex';
 
@@ -798,6 +817,194 @@ async function enrollSubmit() {
   } else {
     showResult({ ok: false, message: data.message || '登録に失敗しました' });
   }
+}
+
+// ---- 打刻履歴（自分のカードをかざして自分の分だけ見る） --------------
+//
+// カードは持っている本人しか読めないので、それ自体が本人確認になっている。
+// （PC打刻は氏名を選ぶだけで本人確認が無いため、そちらには履歴を出していない）
+//
+// タブレットは共用端末なので、開いたまま放置されないよう自動で閉じる。
+
+let historyIdm = '';   // 表示中の履歴の持ち主（月を切り替えるときに使い回す）
+let historyYm = '';    // 表示中の年月 'YYYY-MM'
+let histTimer = null;  // 自動で閉じるタイマー
+let histCountTimer = null;
+let histLoading = false;
+
+/** 履歴モードに入る（カードをかざす待ち） */
+function toHistoryArmed() {
+  if (!device || !polling) { alert('先にリーダーへ接続してください'); return; }
+  unlockAudio();
+  stopSpeaking();
+  clearArmTimers();
+  closeHistory();
+  uiState = 'histArm';
+  lastIdm = '';
+
+  $('status').textContent = '';
+  $('choose').style.display = 'none';
+  setElDisp('subActions', 'none');
+  $('panel').style.display  = 'none';
+  $('armed').style.display  = 'flex';
+
+  const badge = $('armedBadge');
+  badge.textContent = '履歴';
+  badge.className = 'badge in';
+
+  // 無操作なら自動で選択画面に戻す（打刻のかざし待ちと同じ作り）
+  let remain = ARM_TIMEOUT_SEC;
+  $('count').textContent = `（${remain}秒以内にかざしてください）`;
+  countTimer = setInterval(() => {
+    remain--;
+    $('count').textContent = remain > 0 ? `（${remain}秒以内にかざしてください）` : '';
+  }, 1000);
+  armTimer = setTimeout(() => { log('時間切れのため選択に戻ります'); toIdle(); }, ARM_TIMEOUT_SEC * 1000);
+}
+
+/** カードを読めたので、その人の今月の履歴を取りに行く */
+async function openHistory(idm) {
+  clearArmTimers();
+  if (navigator.vibrate) { try { navigator.vibrate(80); } catch (e) {} }
+  beepRead();
+  historyIdm = idm;
+  historyYm = '';
+  $('count').textContent = '';
+  $('status').textContent = '履歴を読み込んでいます…';
+  await loadHistory('');
+}
+
+/** 指定した月の履歴を取得して表示する（ym が空なら今月） */
+async function loadHistory(ym) {
+  if (histLoading || !historyIdm) return;
+  const idm = historyIdm; // 待っている間に閉じられたかどうかの判定に使う
+  histLoading = true;
+  setHistNavEnabled(false);
+
+  const data = await gasRequest({ action: 'history', idm: idm, ym: ym || '' });
+  histLoading = false;
+  log('履歴取得: ' + (data.ok ? (data.label + ' ' + data.count + '件') : JSON.stringify(data)));
+
+  if (historyIdm !== idm) return; // 応答を待つ間に閉じられていたら何も出さない
+
+  if (!data.ok) {
+    // 未登録カードなど。打刻の失敗と同じ見た目で知らせて選択画面へ戻す
+    closeHistory();
+    showResult({ ok: false, message: data.message || '履歴を取得できませんでした' });
+    return;
+  }
+  renderHistory(data);
+}
+
+function setHistNavEnabled(on) {
+  const p = $('hPrev'), n = $('hNext');
+  if (p) p.disabled = !on;
+  if (n) n.disabled = !on;
+}
+
+function renderHistory(data) {
+  uiState = 'history';
+  historyYm = data.ym;
+
+  $('status').textContent = '';
+  $('choose').style.display = 'none';
+  setElDisp('subActions', 'none');
+  $('armed').style.display  = 'none';
+  $('panel').style.display  = 'none';
+  setElDisp('history', 'flex');
+
+  setElText('hWho', (data.name || '（氏名未登録）') + ' さんの打刻履歴');
+  setElText('hMonth', data.label || '');
+  setElText('hTotal', '合計 ' + (data.totalText || '0分'));
+  setElText('hNote', data.note || '');
+
+  const p = $('hPrev'), n = $('hNext');
+  if (p) { p.disabled = !data.hasPrev; p.dataset.ym = data.prevYm || ''; }
+  if (n) { n.disabled = !data.hasNext; n.dataset.ym = data.nextYm || ''; }
+
+  const body = $('hBody');
+  if (!body) return;
+  body.innerHTML = '';
+
+  const days = data.days || [];
+  if (!days.length) {
+    const d = document.createElement('div');
+    d.className = 'hist-empty';
+    d.textContent = 'この月の打刻はありません';
+    body.appendChild(d);
+  } else {
+    body.appendChild(buildHistoryTable(days));
+  }
+
+  startHistoryTimer();
+}
+
+function buildHistoryTable(days) {
+  const table = document.createElement('table');
+  table.className = 'hist';
+
+  const thead = document.createElement('thead');
+  const htr = document.createElement('tr');
+  ['日付', '曜', '出勤', '退勤', '勤務時間', ''].forEach((label) => {
+    const th = document.createElement('th');
+    th.textContent = label;
+    htr.appendChild(th);
+  });
+  thead.appendChild(htr);
+  table.appendChild(thead);
+
+  const tbody = document.createElement('tbody');
+  days.forEach((d) => {
+    const tr = document.createElement('tr');
+    if (d.wd === '土') tr.className = 'sat';
+    if (d.wd === '日') tr.className = 'sun';
+
+    const cells = [
+      ['date num', d.date],
+      ['', d.wd],
+      ['num', d.in || '—'],
+      ['num', d.out || '—'],
+      ['num', d.time || '—'],
+      ['warn', d.warn || ''],
+    ];
+    cells.forEach(([cls, text]) => {
+      const td = document.createElement('td');
+      if (cls) td.className = cls;
+      td.textContent = text;
+      tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
+  });
+  table.appendChild(tbody);
+  return table;
+}
+
+/** 放置されたら自動で閉じる。月を切り替えるたびに数え直す。 */
+function startHistoryTimer() {
+  clearHistoryTimers();
+  let remain = HISTORY_HOLD_SEC;
+  const label = () => setElText('hClose', `閉じる（${remain}秒）`);
+  label();
+  histCountTimer = setInterval(() => { remain--; if (remain >= 0) label(); }, 1000);
+  histTimer = setTimeout(() => { log('履歴を自動で閉じました'); toIdle(); }, HISTORY_HOLD_SEC * 1000);
+}
+
+function clearHistoryTimers() {
+  if (histTimer) { clearTimeout(histTimer); histTimer = null; }
+  if (histCountTimer) { clearInterval(histCountTimer); histCountTimer = null; }
+}
+
+/** 履歴の表示を消す（toIdle から呼ばれる。ここから toIdle を呼ばないこと） */
+function closeHistory() {
+  clearHistoryTimers();
+  historyIdm = '';
+  historyYm = '';
+  setElDisp('history', 'none');
+  const body = $('hBody');
+  if (body) body.innerHTML = '';
+  setElText('hWho', '');
+  setElText('hTotal', '');
+  setElText('hClose', '閉じる');
 }
 
 // ==== USB 接続処理 =====================================================
@@ -858,6 +1065,12 @@ $('btnOut').addEventListener('click', () => toArmed('退勤'));
 $('cancelBtn').addEventListener('click', toIdle);
 
 $('connectBtn').addEventListener('click', connect);
+
+// 打刻履歴（カードをかざした本人の分だけ表示する）
+onEl('historyBtn', 'click', toHistoryArmed);
+onEl('hClose', 'click', toIdle);
+onEl('hPrev', 'click', (e) => { startHistoryTimer(); loadHistory(e.currentTarget.dataset.ym || ''); });
+onEl('hNext', 'click', (e) => { startHistoryTimer(); loadHistory(e.currentTarget.dataset.ym || ''); });
 
 // 社員証の登録
 $('enrollBtn').addEventListener('click', toEnroll);

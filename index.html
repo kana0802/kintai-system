@@ -66,6 +66,42 @@
 
   .cancel { background:#2a4d6e; color:#fff; border:none; border-radius:12px; padding:12px 24px; font-size:18px; font-weight:700; }
 
+  /* --- ①の下に置く「打刻履歴を見る」 --- */
+  .sub { display:flex; gap:16px; justify-content:center; }
+
+  /* --- ④打刻履歴 --- */
+  .history {
+    display:none; flex-direction:column; gap:12px;
+    width:min(96vw, 860px); background:var(--card); border-radius:20px; padding:20px;
+    box-shadow:0 10px 30px rgba(0,0,0,.3);
+  }
+  .hist-who { font-size:clamp(20px,3.6vw,28px); font-weight:800; }
+  .hist-nav { display:flex; align-items:center; justify-content:center; gap:16px; margin-top:6px; }
+  .hist-nav .month { font-size:clamp(18px,3vw,24px); font-weight:700; min-width:7em; font-variant-numeric:tabular-nums; }
+  .hist-nav button {
+    background:var(--accent); color:#fff; border:none; border-radius:12px;
+    padding:10px 18px; font-size:16px; font-weight:700;
+  }
+  .hist-nav button:disabled { opacity:.35; }
+
+  .hist-body { max-height:52vh; overflow:auto; border-radius:12px; background:#0e2c46; }
+  table.hist { width:100%; border-collapse:collapse; font-size:clamp(15px,2.4vw,20px); }
+  table.hist th, table.hist td { padding:10px 8px; text-align:center; white-space:nowrap; }
+  table.hist thead th {
+    position:sticky; top:0; background:#164667; font-size:clamp(13px,2vw,16px); font-weight:700;
+  }
+  table.hist tbody tr { border-top:1px solid #1d3f5e; }
+  table.hist td.num { font-variant-numeric:tabular-nums; }
+  table.hist td.date { font-weight:700; }
+  table.hist td.warn { color:#ffcf6b; font-size:clamp(12px,1.9vw,15px); white-space:normal; text-align:left; }
+  table.hist tr.sat td.date { color:#8fc7ff; }
+  table.hist tr.sun td.date { color:#ff9a9a; }
+  .hist-empty { padding:28px; text-align:center; opacity:.85; font-size:18px; }
+
+  .hist-foot { display:flex; align-items:center; gap:14px; flex-wrap:wrap; justify-content:center; }
+  .hist-total { font-size:clamp(17px,2.8vw,22px); font-weight:800; }
+  .hist-note { font-size:14px; opacity:.8; }
+
   footer { padding:10px 16px; background:rgba(0,0,0,.25); display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
   button.foot { font-size:15px; padding:10px 16px; border-radius:12px; border:none; background:var(--accent); color:#fff; font-weight:700; }
   button.foot:disabled { opacity:.4; }
@@ -95,6 +131,11 @@
     <button class="bigbtn out" id="btnOut">退勤<small>たいきん</small></button>
   </div>
 
+  <!-- ①-2 自分の打刻履歴を見る（カードをかざした本人の分だけ表示する） -->
+  <div class="sub" id="subActions">
+    <button class="cancel" id="historyBtn">打刻履歴を見る</button>
+  </div>
+
   <!-- ② カードをかざす案内 -->
   <div class="armed" id="armed">
     <div class="badge" id="armedBadge">出勤</div>
@@ -109,6 +150,24 @@
     <div class="result-type" id="rType"></div>
     <div class="result-time" id="rTime"></div>
     <div class="result-msg" id="rMsg"></div>
+  </div>
+
+  <!-- ④ 打刻履歴（カードをかざした本人の分だけ。放置すると自動で閉じる） -->
+  <div class="history" id="history">
+    <div>
+      <div class="hist-who" id="hWho">—</div>
+      <div class="hist-nav">
+        <button id="hPrev" type="button">← 前の月</button>
+        <div class="month" id="hMonth">—</div>
+        <button id="hNext" type="button">次の月 →</button>
+      </div>
+    </div>
+    <div class="hist-body" id="hBody"></div>
+    <div class="hist-foot">
+      <span class="hist-total" id="hTotal"></span>
+      <span class="hist-note" id="hNote"></span>
+      <button class="cancel" id="hClose" type="button">閉じる</button>
+    </div>
   </div>
 </div>
 
